@@ -1,0 +1,56 @@
+---
+description: Security rules for NEMESIS — data handling, scope validation, and ethical guardrails
+globs: ["nemesis/**/*.py"]
+alwaysApply: true
+---
+
+# Security Rules
+
+## Sensitive Data Handling
+
+- NEVER log target IPs, hostnames, credentials, CVE payloads, or finding details
+  at `DEBUG` level or above in plain text.
+- NEVER include raw tool output in exception messages or tracebacks.
+- All findings stored in SQLite are local-only — never transmitted to external services
+  unless the user has explicitly configured and consented to an external LLM provider.
+- Ollama runs locally — this is the default and preferred mode. External provider support
+  (when added) must be opt-in with explicit acknowledgment from the user.
+
+## Scope Validation
+
+- Before any tool execution, the target MUST be validated against the project scope:
+  - IP addresses must fall within the configured CIDR ranges.
+  - Domains must match or be subdomains of the configured targets.
+- Out-of-scope targets MUST be rejected with a clear error — never silently skipped.
+- Scope validation lives in `core/project.py` and is the single source of truth.
+
+## Tool Output Trust
+
+- All output from external tools (nmap, nikto, gobuster, etc.) is UNTRUSTED until
+  processed by the Analyst agent.
+- Never interpolate raw tool output directly into shell commands (no shell injection).
+- Always use `subprocess` with `shell=False` and explicit argument lists.
+- Sanitize any user-provided input before it is passed to subprocess arguments.
+
+## Destructive Action Guardrails
+
+- Tools tagged `destructive=True` require explicit user confirmation (see architecture rules).
+- The following actions are ALWAYS considered destructive regardless of tool tag:
+  - Any exploit execution
+  - Brute-force / credential stuffing
+  - File uploads to target systems
+  - Commands that modify target system state
+  - Any action that could cause service unavailability (DoS-like behavior)
+- Destructive action confirmations MUST be logged with:
+  - Timestamp
+  - Action description
+  - User confirmation ("yes" response)
+  - Session ID
+
+## Ethical Guardrails
+
+- NEMESIS is designed for authorized penetration testing only.
+- The project scope acts as the technical enforcement of authorization boundaries.
+- Never add features that bypass scope validation or skip confirmation gates.
+- The disclaimer in README.md and the first-run message are not optional — they must
+  always be present and visible.

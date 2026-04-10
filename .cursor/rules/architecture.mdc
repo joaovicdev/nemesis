@@ -1,0 +1,70 @@
+---
+description: NEMESIS architecture rules — layer separation, agent patterns, and data flow
+globs: ["nemesis/**/*.py"]
+alwaysApply: true
+---
+
+# Architecture Rules
+
+## Layer Separation
+
+NEMESIS is divided into four strict layers. Imports must only flow downward — upper layers
+depend on lower ones, never the reverse.
+
+```
+tui/          ← presentation only, no business logic
+core/         ← domain models, config, project state
+agents/       ← orchestrator, analyst, executor (AI + tool logic)
+db/ + tools/  ← persistence and external tool wrappers
+```
+
+- `tui/` MUST NOT import from `agents/` directly. All agent interaction goes through `core/`.
+- `agents/` MUST NOT import from `tui/`. Agents communicate results via events or callbacks
+  registered by `core/`.
+- `tools/` contains only thin wrappers that execute system commands and return raw output.
+  No analysis or interpretation belongs here.
+
+## Agent Patterns
+
+- All agents (`orchestrator`, `analyst`, `executor`) are `async` classes.
+- Agents communicate results by emitting typed `Finding` or `AgentEvent` objects.
+- Executors are short-lived: instantiated per task, execute, emit result, and are garbage-collected.
+- The Orchestrator holds the only long-lived context object (`ProjectContext`).
+- The Analyst ALWAYS processes raw tool output before it reaches the Orchestrator.
+  Raw subprocess output must never be sent directly to the LLM as-is.
+
+## Data Flow
+
+```
+User input → Orchestrator → [spawns] Executor(s)
+                                         ↓ raw output
+                                      Analyst
+                                         ↓ structured Finding
+                         Orchestrator ← Finding
+                                ↓
+                          ProjectContext (SQLite)
+                                ↓
+                            TUI update
+```
+
+## Destructive Action Gate
+
+Any tool or agent action that is potentially destructive (exploit execution, brute force,
+file upload, lateral movement) MUST:
+
+1. Be tagged with `destructive=True` in its tool definition.
+2. Emit a `ConfirmationRequired` event to the TUI before execution.
+3. Only proceed after receiving an explicit `UserConfirmed` event.
+4. Log the confirmation with timestamp to the project session.
+
+## Finding Lifecycle
+
+Findings MUST follow this lifecycle and MUST NOT skip stages:
+
+```
+RAW → UNVERIFIED → VALIDATED (or DISMISSED) → REPORTED
+```
+
+Executors produce `RAW`. The Analyst promotes to `UNVERIFIED` with a confidence score.
+The Orchestrator (with optional user input) promotes to `VALIDATED` or `DISMISSED`.
+Only `VALIDATED` findings appear in reports.

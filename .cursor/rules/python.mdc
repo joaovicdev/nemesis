@@ -1,0 +1,66 @@
+---
+description: Python coding standards for NEMESIS — type hints, async, style
+globs: ["nemesis/**/*.py", "tests/**/*.py"]
+alwaysApply: true
+---
+
+# Python Standards
+
+## Type Annotations
+
+- All function signatures MUST have type annotations — parameters and return types.
+- Use `from __future__ import annotations` at the top of every module to enable
+  postponed evaluation of annotations.
+- Prefer `X | Y` union syntax over `Optional[X]` or `Union[X, Y]`.
+- Use `TypeAlias` for complex types used in multiple places.
+
+```python
+# Good
+async def analyze(output: str, context: ProjectContext) -> list[Finding]: ...
+
+# Bad
+def analyze(output, context):  # no types
+```
+
+## Async / Await
+
+- All I/O operations (subprocess, database, LLM calls, HTTP) MUST be `async`.
+- Use `asyncio.create_task()` for fire-and-forget background work.
+- Use `asyncio.gather()` for parallel independent operations (e.g. running multiple tools).
+- Never use `time.sleep()` — use `await asyncio.sleep()`.
+- Never call blocking I/O in async functions — use `asyncio.to_thread()` if needed.
+
+## Data Models
+
+- Use `pydantic.BaseModel` for all data models exchanged between layers
+  (`Finding`, `Project`, `Session`, `AgentEvent`, etc.).
+- Use `dataclasses.dataclass` only for simple internal data containers that do not
+  cross layer boundaries.
+- All models that are persisted to SQLite must have an `id: str` field (UUID).
+
+## Logging
+
+- NEVER use `print()` in production code. Use `logging.getLogger(__name__)`.
+- In TUI code, emit Textual messages/events instead of logging directly.
+- Log levels: `DEBUG` for raw tool output, `INFO` for agent state changes,
+  `WARNING` for unexpected conditions, `ERROR` for failures.
+
+## Code Style
+
+- Maximum line length: 100 characters.
+- Use `ruff` for formatting and linting — run `uv run ruff check` and `uv run ruff format`.
+- Prefer early returns over deeply nested conditionals.
+- Prefer named constants over magic strings — define them at module level in UPPER_CASE.
+- All exceptions should be caught at boundaries (agents, tool runners) and converted to
+  typed result objects — never let raw exceptions propagate to the TUI.
+
+## Module Structure
+
+Each module should follow this order:
+1. `from __future__ import annotations`
+2. Standard library imports
+3. Third-party imports
+4. Local imports
+5. Module-level constants
+6. Type aliases
+7. Classes / functions
