@@ -45,26 +45,6 @@ NEMESIS: [runs verification] "Confirmed. LFI works. Document and move on, or exp
 
 ---
 
-## How NEMESIS differs from other tools
-
-
-| Feature                 | METATRON              | NEMESIS                                  |
-| ----------------------- | --------------------- | ---------------------------------------- |
-| Mental model            | Isolated scans        | Full engagement project                  |
-| AI role                 | Analyzes output       | Plans, assists, correlates               |
-| Memory                  | None between scans    | Cumulative per project                   |
-| False positive handling | None                  | Analyst agent filters all raw output     |
-| Finding correlation     | None                  | Cross-scan correlation with attack paths |
-| Control                 | Fully automatic       | Auto / Step / Manual modes               |
-| Storage                 | MariaDB (external)    | SQLite (embedded, portable)              |
-| AI layer                | Fixed local model     | LiteLLM (provider-agnostic abstraction)  |
-| Default AI backend      | Fixed Qwen via Ollama | Ollama local (swappable via config)      |
-| Platforms               | Parrot OS only        | Kali, Parrot, Ubuntu, macOS              |
-| Interface               | Text menus            | Full reactive TUI with chat              |
-
-
----
-
 ## Architecture
 
 ```
