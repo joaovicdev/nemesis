@@ -8,7 +8,7 @@
 [![Ollama](https://img.shields.io/badge/default%20backend-Ollama-blue?style=flat-square)](https://ollama.com)
 [![Status](https://img.shields.io/badge/status-alpha-red?style=flat-square)]()
 
-**AI-assisted penetration testing co-pilot. Not an autonomous hacker — your expert analyst, always at your side.**
+**AI-assisted penetration testing, not an autonomous hacker, your expert analyst, always at your side.**
 
 </div>
 
