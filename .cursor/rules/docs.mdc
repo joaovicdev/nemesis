@@ -1,0 +1,15 @@
+---
+description: NEMESIS docs rules
+alwaysApply: true
+---
+
+
+# Docs necessity
+
+## Python 3 Docs
+
+- Even look to python 3 docs if needed to ensure a command will return and execute as expected
+
+## Ollama docs
+
+- Even look to Ollama if needed to ensure that ouput is returning as expected

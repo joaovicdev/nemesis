@@ -59,6 +59,7 @@ class Project(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     targets: list[str]
+    out_of_scope: list[str] = Field(default_factory=list)
     context: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
     mode: ControlMode = ControlMode.STEP
@@ -130,14 +131,15 @@ class TaskRecord(BaseModel):
 CREATE_TABLES_SQL: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS projects (
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        targets     TEXT NOT NULL,   -- JSON array
-        context     TEXT NOT NULL DEFAULT '',
-        status      TEXT NOT NULL DEFAULT 'active',
-        mode        TEXT NOT NULL DEFAULT 'step',
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        targets      TEXT NOT NULL,   -- JSON array
+        out_of_scope TEXT NOT NULL DEFAULT '[]',  -- JSON array
+        context      TEXT NOT NULL DEFAULT '',
+        status       TEXT NOT NULL DEFAULT 'active',
+        mode         TEXT NOT NULL DEFAULT 'step',
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
     )
     """,
     """

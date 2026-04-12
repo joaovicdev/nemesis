@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import ClassVar
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Static, TextArea
+from textual.widgets import Button, Input, Static, TextArea
 
+logger = logging.getLogger(__name__)
 
 # Loose validators for target formats
 _IP_PATTERN = re.compile(
@@ -57,6 +59,7 @@ class NewProjectScreen(ModalScreen[dict | None]):
         background: #0f0f1a;
         border: tall #1a1a3a;
         width: 72;
+        max-height: 90vh;
         height: auto;
         padding: 2 3;
     }
@@ -198,9 +201,7 @@ class NewProjectScreen(ModalScreen[dict | None]):
         self._render_step()
 
     def _render_step(self) -> None:
-        self.query_one("#step-indicator", Static).update(
-            self._step_indicator_text()
-        )
+        self.query_one("#step-indicator", Static).update(self._step_indicator_text())
         self.query_one("#error-msg", Static).update("")
 
         content = self.query_one("#step-content", Container)
@@ -219,8 +220,23 @@ class NewProjectScreen(ModalScreen[dict | None]):
         btn_next.label = "start →" if self._step == 3 else "next →"
         btn_back.display = self._step > 1
 
+        # Ensure the first input of the current step receives focus after the
+        # next render cycle — the Input widgets are mounted dynamically so we
+        # must wait for them to be reflected in the focusable-widget list.
+        self.call_after_refresh(self._focus_active_input)
+
+    def _focus_active_input(self) -> None:
+        """Focus the first text input of the currently rendered wizard step."""
+        input_id = {1: "#input-targets", 2: "#input-out-of-scope"}.get(self._step)
+        if input_id is None:
+            return
+        try:
+            self.query_one(input_id, Input).focus()
+        except Exception:
+            pass
+
     def _step_indicator_text(self) -> Text:
-        steps = ["TARGET", "CONTEXT", "CONFIRM"]
+        steps = ["TARGET", "SCOPE/CONTEXT", "CONFIRM"]
         text = Text()
         for i, label in enumerate(steps, 1):
             if i < self._step:
@@ -255,6 +271,23 @@ class NewProjectScreen(ModalScreen[dict | None]):
         parent.mount(name_inp)
 
     def _render_step2(self, parent: Container) -> None:
+        parent.mount(Static("Out of scope", classes="field-label"))
+        parent.mount(
+            Static(
+                "Optional — IPs, CIDRs, or domains explicitly excluded from testing.\n"
+                "Separate multiple entries with commas.",
+                classes="field-hint",
+            )
+        )
+        saved_oos = str(self._data.get("out_of_scope_raw", ""))
+        oos_inp = Input(
+            value=saved_oos,
+            placeholder="admin.target.com, 10.0.0.1",
+            id="input-out-of-scope",
+        )
+        oos_inp.add_class("field-input")
+        parent.mount(oos_inp)
+
         parent.mount(Static("Engagement context", classes="field-label"))
         parent.mount(
             Static(
@@ -276,20 +309,25 @@ class NewProjectScreen(ModalScreen[dict | None]):
 
         name = str(self._data.get("name", ""))
         targets = self._data.get("targets", [])
+        out_of_scope = self._data.get("out_of_scope", [])
         context = str(self._data.get("context", "")).strip()
 
         summary = Text()
-        summary.append("  NAME     ", style="bold #007a9e")
+        summary.append("  NAME      ", style="bold #007a9e")
         summary.append(f"{name}\n", style="#c8c8d8")
-        summary.append("  TARGETS  ", style="bold #007a9e")
+        summary.append("  TARGETS   ", style="bold #007a9e")
         summary.append(f"{', '.join(targets)}\n", style="#c8c8d8")  # type: ignore[arg-type]
-        summary.append("  CONTEXT  ", style="bold #007a9e")
+        summary.append("  EXCL.     ", style="bold #007a9e")
+        if out_of_scope:
+            summary.append(f"{', '.join(out_of_scope)}\n", style="#c8c8d8")  # type: ignore[arg-type]
+        else:
+            summary.append("(none)\n", style="italic #555570")
+        summary.append("  CONTEXT   ", style="bold #007a9e")
         if context:
-            # First line inline, rest indented
             lines = context.splitlines()
             summary.append(f"{lines[0]}\n", style="#c8c8d8")
             for line in lines[1:]:
-                summary.append(f"           {line}\n", style="#c8c8d8")
+                summary.append(f"            {line}\n", style="#c8c8d8")
         else:
             summary.append("(none)\n", style="italic #555570")
 
@@ -349,16 +387,33 @@ class NewProjectScreen(ModalScreen[dict | None]):
 
     def _collect_step2(self) -> None:
         try:
+            oos_raw = self.query_one("#input-out-of-scope", Input).value.strip()
+        except Exception:
+            oos_raw = ""
+        try:
             context = self.query_one("#context-area", TextArea).text.strip()
         except Exception:
             context = ""
+        self._data["out_of_scope_raw"] = oos_raw
+        self._data["out_of_scope"] = _parse_targets(oos_raw) if oos_raw else []
         self._data["context"] = context
 
     def _finish(self) -> None:
+        targets: list[str] = list(self._data.get("targets", []))  # type: ignore[arg-type]
+        logger.info(
+            "New project wizard completed",
+            extra={
+                "event": "tui.new_project_wizard_confirmed",
+                "target_count": len(targets),
+                "has_out_of_scope": bool(self._data.get("out_of_scope")),
+                "has_context": bool(str(self._data.get("context", "")).strip()),
+            },
+        )
         self.dismiss(
             {
                 "name": str(self._data.get("name", "")),
-                "targets": list(self._data.get("targets", [])),  # type: ignore[arg-type]
+                "targets": targets,
+                "out_of_scope": list(self._data.get("out_of_scope", [])),  # type: ignore[arg-type]
                 "context": str(self._data.get("context", "")),
             }
         )
@@ -367,4 +422,8 @@ class NewProjectScreen(ModalScreen[dict | None]):
         self.query_one("#error-msg", Static).update(f"  ⚠ {msg}")
 
     def action_cancel(self) -> None:
+        logger.debug(
+            "New project wizard cancelled",
+            extra={"event": "tui.new_project_wizard_cancelled", "step": self._step},
+        )
         self.dismiss(None)

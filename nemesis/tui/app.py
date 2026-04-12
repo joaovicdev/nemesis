@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
-from textual.app import App, ComposeResult
+from textual.app import App
 from textual.binding import Binding
 
+from nemesis.agents.llm_client import LLMClient
+from nemesis.db.database import Database
 from nemesis.tui.screens.splash import SplashScreen
 
+if TYPE_CHECKING:
+    from nemesis.tui.screens.main import MainScreen
+
+
+logger = logging.getLogger(__name__)
 
 CSS_PATH = Path(__file__).parent / "theme.tcss"
 
@@ -28,18 +37,52 @@ class NemesisApp(App[None]):
         Binding("f1", "help", "Help", show=False),
     ]
 
-    def on_mount(self) -> None:
-        self.push_screen(SplashScreen())
+    def __init__(self) -> None:
+        super().__init__()
+        self.db: Database = Database()
+        self.llm_client: LLMClient = LLMClient()
+
+    async def on_mount(self) -> None:
+        logger.info(
+            "NEMESIS application started",
+            extra={"event": "tui.app_started"},
+        )
+        await self.db.connect()
+        await self.push_screen(SplashScreen())
+
+    async def on_unmount(self) -> None:
+        logger.info(
+            "NEMESIS application stopping",
+            extra={"event": "tui.app_stopped"},
+        )
+        await self.db.close()
+        await asyncio.sleep(0)  # let aiohttp finalise open connections before loop closes
 
     def action_new_project(self) -> None:
         from nemesis.tui.screens.new_project import NewProjectScreen
 
-        self.push_screen(NewProjectScreen())
+        main = self._get_main_screen()
+        if main is not None:
+            self.push_screen(NewProjectScreen(), main._on_project_created)
+        else:
+            self.push_screen(NewProjectScreen())
 
     def action_load_project(self) -> None:
-        # Placeholder — will open a project picker
-        pass
+        from nemesis.tui.screens.load_project import LoadProjectScreen
+
+        main = self._get_main_screen()
+        if main is not None:
+            self.push_screen(LoadProjectScreen(), main._on_project_loaded)
+        else:
+            self.push_screen(LoadProjectScreen())
 
     def action_help(self) -> None:
-        # Placeholder — will show help overlay
         pass
+
+    def _get_main_screen(self) -> MainScreen | None:
+        from nemesis.tui.screens.main import MainScreen
+
+        for screen in self.screen_stack:
+            if isinstance(screen, MainScreen):
+                return screen
+        return None

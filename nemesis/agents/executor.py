@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
-
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,16 @@ class BaseExecutor:
         binary = self._resolve_binary()
         cmd = self._build_command(binary)
 
-        logger.debug("[%s] Running: %s", self.task_id, " ".join(cmd))
+        logger.info(
+            "Tool execution started",
+            extra={
+                "event": "executor.tool_started",
+                "tool": self.TOOL_NAME,
+                "task_id": self.task_id,
+            },
+        )
 
-        start = asyncio.get_event_loop().time()
+        t0 = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -86,10 +93,20 @@ class BaseExecutor:
                 stdout_b, stderr_b = await asyncio.wait_for(
                     proc.communicate(), timeout=self.timeout
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.communicate()
-                logger.warning("[%s] Tool timed out after %ss", self.task_id, self.timeout)
+                elapsed_ms = round((time.monotonic() - t0) * 1000)
+                logger.warning(
+                    "Tool timed out",
+                    extra={
+                        "event": "executor.tool_timeout",
+                        "tool": self.TOOL_NAME,
+                        "task_id": self.task_id,
+                        "timeout_s": self.timeout,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
                 stdout_b, stderr_b = b"", b"[timed out]"
                 proc.returncode = -1
 
@@ -99,15 +116,96 @@ class BaseExecutor:
                 f"Install it or set the correct path in config."
             ) from exc
 
-        elapsed = asyncio.get_event_loop().time() - start
+        elapsed = time.monotonic() - t0
         exit_code = proc.returncode or 0
+        stdout_str = stdout_b.decode("utf-8", errors="replace")
+        logger.info(
+            "Tool execution completed",
+            extra={
+                "event": "executor.tool_completed",
+                "tool": self.TOOL_NAME,
+                "task_id": self.task_id,
+                "exit_code": exit_code,
+                "elapsed_ms": round(elapsed * 1000),
+                "stdout_bytes": len(stdout_b),
+                "stderr_bytes": len(stderr_b),
+                "success": exit_code == 0,
+            },
+        )
 
         return ExecutorResult(
             task_id=self.task_id,
             tool=self.TOOL_NAME,
             target=self.target,
             exit_code=exit_code,
-            stdout=stdout_b.decode("utf-8", errors="replace"),
+            stdout=stdout_str,
+            stderr=stderr_b.decode("utf-8", errors="replace"),
+            elapsed_seconds=elapsed,
+            success=exit_code == 0,
+        )
+
+    async def run_streaming(
+        self,
+        on_line: Callable[[str], None],
+    ) -> ExecutorResult:
+        """Run the tool and fire on_line() for each stdout line in real-time."""
+        binary = self._resolve_binary()
+        cmd = self._build_command(binary)
+
+        logger.info(
+            "Tool streaming started",
+            extra={
+                "event": "executor.tool_started",
+                "tool": self.TOOL_NAME,
+                "task_id": self.task_id,
+                "mode": "streaming",
+            },
+        )
+
+        t0 = time.monotonic()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise ToolNotFoundError(
+                f"Tool '{self.TOOL_BINARY}' not found. "
+                f"Install it or set the correct path in config."
+            ) from exc
+
+        stdout_lines: list[str] = []
+        assert proc.stdout is not None
+        async for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            stdout_lines.append(line)
+            on_line(line)
+
+        _, stderr_b = await proc.communicate()
+        elapsed = time.monotonic() - t0
+        exit_code = proc.returncode or 0
+        stdout_joined = "\n".join(stdout_lines)
+        logger.info(
+            "Tool streaming completed",
+            extra={
+                "event": "executor.tool_completed",
+                "tool": self.TOOL_NAME,
+                "task_id": self.task_id,
+                "exit_code": exit_code,
+                "elapsed_ms": round(elapsed * 1000),
+                "stdout_bytes": sum(len(line) for line in stdout_lines),
+                "stderr_bytes": len(stderr_b),
+                "success": exit_code == 0,
+                "mode": "streaming",
+            },
+        )
+        return ExecutorResult(
+            task_id=self.task_id,
+            tool=self.TOOL_NAME,
+            target=self.target,
+            exit_code=exit_code,
+            stdout=stdout_joined,
             stderr=stderr_b.decode("utf-8", errors="replace"),
             elapsed_seconds=elapsed,
             success=exit_code == 0,
@@ -163,9 +261,7 @@ class GobusterExecutor(BaseExecutor):
     DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
 
     def _build_command(self, binary: str) -> list[str]:
-        wordlist = next(
-            (a for a in self.extra_args if a.startswith("-w")), None
-        )
+        wordlist = next((a for a in self.extra_args if a.startswith("-w")), None)
         base = [binary, "dir", "-u", self.target, "-q", "--no-progress"]
         if not wordlist:
             base += ["-w", self.DEFAULT_WORDLIST]
@@ -214,7 +310,5 @@ def get_executor(
     """Factory — returns the appropriate executor for a given tool name."""
     cls = EXECUTOR_REGISTRY.get(tool.lower())
     if cls is None:
-        raise ValueError(
-            f"Unknown tool '{tool}'. Available: {list(EXECUTOR_REGISTRY.keys())}"
-        )
+        raise ValueError(f"Unknown tool '{tool}'. Available: {list(EXECUTOR_REGISTRY.keys())}")
     return cls(task_id=task_id, target=target, extra_args=extra_args, timeout=timeout)

@@ -14,12 +14,14 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
+from textual.worker import Worker
 
 
 class MessageRole(str, Enum):
     USER = "user"
     NEMESIS = "nemesis"
     SYSTEM = "system"
+    AGENT = "agent"
 
 
 @dataclass
@@ -36,7 +38,11 @@ _ROLE_STYLE: dict[MessageRole, tuple[str, str, str]] = {
     MessageRole.NEMESIS: ("[nemesis]", "#007a9e", "#00d4ff"),
     MessageRole.USER:    ("[you]    ", "#333355", "#c8c8d8"),
     MessageRole.SYSTEM:  ("[system] ", "#333333", "#555570"),
+    MessageRole.AGENT:   ("[agent]  ", "#1a3a1a", "#444460"),
 }
+
+_AGENT_BURST_LIMIT = 200
+_AGENT_TRUNCATION_MSG = "  ··· output truncated (see raw log) ···"
 
 
 class ChatPanel(Widget):
@@ -113,7 +119,9 @@ class ChatPanel(Widget):
     ) -> None:
         super().__init__(**kwargs)
         self._on_submit = on_submit
-        self._thinking_task: asyncio.Task[None] | None = None
+        self._thinking_worker: Worker[None] | None = None
+        self._agent_burst_count: int = 0
+        self._agent_truncated: bool = False
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, markup=True, highlight=False)
@@ -141,10 +149,13 @@ class ChatPanel(Widget):
     def watch_is_thinking(self, value: bool) -> None:
         indicator = self.query_one("#thinking-indicator", Static)
         if value:
-            self.run_worker(self._animate_thinking(), exclusive=True, name="thinking")
+            self._thinking_worker = self.run_worker(
+                self._animate_thinking(), exclusive=True, name="thinking"
+            )
         else:
-            if self._thinking_task:
-                self._thinking_task.cancel()
+            if self._thinking_worker is not None:
+                self._thinking_worker.cancel()
+                self._thinking_worker = None
             indicator.update("")
 
     async def _animate_thinking(self) -> None:
@@ -170,15 +181,33 @@ class ChatPanel(Widget):
 
     def append_nemesis(self, content: str) -> None:
         """Add a NEMESIS response to the chat log."""
+        self._agent_burst_count = 0
+        self._agent_truncated = False
         self._append_message(ChatMessage(role=MessageRole.NEMESIS, content=content))
 
     def append_user(self, content: str) -> None:
         """Add a user message to the chat log (used for programmatic injection)."""
+        self._agent_burst_count = 0
+        self._agent_truncated = False
         self._append_message(ChatMessage(role=MessageRole.USER, content=content))
 
     def append_system(self, content: str) -> None:
         """Add a system/status message to the chat log."""
+        self._agent_burst_count = 0
+        self._agent_truncated = False
         self._append_system(content)
+
+    def append_agent_line(self, line: str) -> None:
+        """Stream a single line of agent (executor) output to the chat log."""
+        if self._agent_truncated:
+            return
+        if self._agent_burst_count >= _AGENT_BURST_LIMIT:
+            log = self.query_one("#chat-log", RichLog)
+            log.write(Text(_AGENT_TRUNCATION_MSG, style="italic #555570"))
+            self._agent_truncated = True
+            return
+        self._agent_burst_count += 1
+        self._append_message(ChatMessage(role=MessageRole.AGENT, content=line))
 
     def set_thinking(self, thinking: bool) -> None:
         self.is_thinking = thinking

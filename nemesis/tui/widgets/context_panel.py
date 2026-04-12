@@ -18,11 +18,16 @@ class ProjectSummary:
     name: str
     targets: list[str]
     phase: str
+    out_of_scope: list[str] = None  # type: ignore[assignment]
     findings_critical: int = 0
     findings_high: int = 0
     findings_medium: int = 0
     findings_low: int = 0
     mode: str = "step"
+
+    def __post_init__(self) -> None:
+        if self.out_of_scope is None:
+            self.out_of_scope = []
 
 
 class ContextPanel(Widget):
@@ -50,9 +55,9 @@ class ContextPanel(Widget):
 
     def _refresh_content(self, project: ProjectSummary | None) -> None:
         widget = self.query_one("#context-content", Static)
-        widget.update(self._render(project))
+        widget.update(self._build_content(project))
 
-    def _render(self, project: ProjectSummary | None) -> Text:
+    def _build_content(self, project: ProjectSummary | None) -> Text:
         text = Text()
 
         # Section title
@@ -72,6 +77,14 @@ class ContextPanel(Widget):
             text.append(f"  {target}\n", style="#555570")
         if len(project.targets) > 3:
             text.append(f"  +{len(project.targets) - 3} more\n", style="#555570")
+
+        # Out of scope
+        if project.out_of_scope:
+            text.append("\n  EXCL.\n", style="#444460")
+            for oos in project.out_of_scope[:2]:
+                text.append(f"  {oos}\n", style="#444460")
+            if len(project.out_of_scope) > 2:
+                text.append(f"  +{len(project.out_of_scope) - 2} more\n", style="#444460")
 
         # Phase
         text.append("\n  PHASE  ", style="#555570")
