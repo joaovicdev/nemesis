@@ -7,8 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel, Field, field_validator
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
 
@@ -29,11 +28,12 @@ class SessionPhase(str, Enum):
 
 class FindingStatus(str, Enum):
     """Lifecycle stages a finding must follow in order."""
-    RAW = "raw"                  # emitted by executor
-    UNVERIFIED = "unverified"    # processed by analyst, has confidence score
-    VALIDATED = "validated"      # confirmed by orchestrator / user
-    DISMISSED = "dismissed"      # false positive, discarded
-    REPORTED = "reported"        # included in final report
+
+    RAW = "raw"  # emitted by executor
+    UNVERIFIED = "unverified"  # processed by analyst, has confidence score
+    VALIDATED = "validated"  # confirmed by orchestrator / user
+    DISMISSED = "dismissed"  # false positive, discarded
+    REPORTED = "reported"  # included in final report
 
 
 class FindingSeverity(str, Enum):
@@ -93,8 +93,8 @@ class Finding(BaseModel):
     port: str = ""
     service: str = ""
     cve_ids: list[str] = Field(default_factory=list)
-    tool_source: str = ""       # which tool produced this
-    raw_evidence: str = ""      # raw tool output snippet
+    tool_source: str = ""  # which tool produced this
+    raw_evidence: str = ""  # raw tool output snippet
     remediation: str = ""
     related_finding_ids: list[str] = Field(default_factory=list)
     discovered_at: datetime = Field(default_factory=datetime.utcnow)
@@ -124,6 +124,62 @@ class TaskRecord(BaseModel):
     note: str = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
+
+
+# ── Plan models ────────────────────────────────────────────────────────────────
+
+
+class PlanStepStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class PlanStep(BaseModel):
+    """A single step in a structured attack plan."""
+
+    id: str  # e.g. "step-001"
+    name: str
+    description: str
+    required_tools: list[str]  # e.g. ["nmap"]
+    depends_on: list[str]  # list of step ids
+    agent: str  # e.g. "recon_agent"
+    args: dict[str, Any] = Field(default_factory=dict)
+    status: PlanStepStatus = PlanStepStatus.PENDING
+    result_summary: str = ""
+    findings_count: int = 0
+
+
+class AttackPlan(BaseModel):
+    """A structured multi-step attack plan for a project session."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    project_id: str
+    session_id: str
+    goal: str
+    steps: list[PlanStep]
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AgentResponse(BaseModel):
+    """Structured output format for agent actions."""
+
+    thought: str
+    action: str
+    tool: str | None = None
+    args: dict[str, Any] = Field(default_factory=dict)
+    result: str
+    next_step: str | None = None
+
+    @field_validator("next_step", mode="before")
+    @classmethod
+    def coerce_next_step(cls, v: object) -> str | None:
+        """Accept str | None; discard any other type the LLM may return (e.g. dict)."""
+        if v is None or isinstance(v, str):
+            return v
+        return None
 
 
 # ── SQL DDL ────────────────────────────────────────────────────────────────────
@@ -197,8 +253,19 @@ CREATE_TABLES_SQL: list[str] = [
         completed_at TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS attack_plans (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES projects(id),
+        session_id  TEXT NOT NULL REFERENCES sessions(id),
+        goal        TEXT NOT NULL,
+        steps       TEXT NOT NULL,   -- JSON blob of PlanStep list
+        created_at  TEXT NOT NULL
+    )
+    """,
     # Indexes for common queries
     "CREATE INDEX IF NOT EXISTS idx_findings_project ON findings(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_attack_plans_project ON attack_plans(project_id)",
     "CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(project_id, severity)",
     "CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(project_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)",

@@ -9,6 +9,9 @@ import time
 from dataclasses import dataclass, field
 
 import litellm
+from pydantic import ValidationError
+
+from nemesis.db.models import AgentResponse
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,7 @@ _DEFAULT_MODEL = "ollama/llama3.1:8b"
 _DEFAULT_BASE_URL = "http://localhost:11434"
 
 litellm.suppress_debug_info = True
+litellm.aiohttp_transport = False  # use httpx instead of aiohttp to avoid unclosed-session warnings
 
 
 @dataclass
@@ -141,6 +145,33 @@ class LLMClient:
         """
         raw = await self.chat(messages, temperature=temperature, max_tokens=4096)
         return _parse_json_response(raw)
+
+    async def chat_agent_response(
+        self,
+        messages: list[dict[str, str]],
+    ) -> AgentResponse:
+        """
+        Like chat_json() but validates the response against the AgentResponse schema.
+
+        Falls back to a safe default AgentResponse if validation fails, so callers
+        never need to handle a raw dict or a ValidationError.
+        """
+        raw = await self.chat_json(messages)
+        try:
+            return AgentResponse.model_validate(raw)
+        except ValidationError as exc:
+            logger.warning(
+                "AgentResponse validation failed — using safe default",
+                extra={"event": "llm.agent_response_invalid", "errors": str(exc)},
+            )
+            return AgentResponse(
+                thought="LLM returned invalid schema — using defaults",
+                action="fallback",
+                tool=None,
+                args={},
+                result="",
+                next_step=None,
+            )
 
 
 def _parse_json_response(raw: str) -> dict:
