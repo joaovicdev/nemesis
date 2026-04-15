@@ -19,6 +19,7 @@ _AGENT_COLORS: dict[str, str] = {
     "enum_agent": "#ff9500",
     "vuln_agent": "#ff2040",
     "enumeration_agent": "#ff9500",
+    "ffuf_agent": "#f48c06",
     "vulnerability_agent": "#ff2040",
 }
 

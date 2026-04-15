@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -12,13 +12,13 @@ from pydantic import BaseModel, Field, field_validator
 # ── Enums ──────────────────────────────────────────────────────────────────────
 
 
-class ProjectStatus(str, Enum):
+class ProjectStatus(StrEnum):
     ACTIVE = "active"
     ARCHIVED = "archived"
     COMPLETED = "completed"
 
 
-class SessionPhase(str, Enum):
+class SessionPhase(StrEnum):
     RECON = "recon"
     ENUMERATION = "enumeration"
     EXPLOITATION = "exploitation"
@@ -26,7 +26,7 @@ class SessionPhase(str, Enum):
     REPORTING = "reporting"
 
 
-class FindingStatus(str, Enum):
+class FindingStatus(StrEnum):
     """Lifecycle stages a finding must follow in order."""
 
     RAW = "raw"  # emitted by executor
@@ -36,7 +36,7 @@ class FindingStatus(str, Enum):
     REPORTED = "reported"  # included in final report
 
 
-class FindingSeverity(str, Enum):
+class FindingSeverity(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
@@ -44,7 +44,7 @@ class FindingSeverity(str, Enum):
     INFO = "info"
 
 
-class ControlMode(str, Enum):
+class ControlMode(StrEnum):
     AUTO = "auto"
     STEP = "step"
     MANUAL = "manual"
@@ -96,6 +96,9 @@ class Finding(BaseModel):
     tool_source: str = ""  # which tool produced this
     raw_evidence: str = ""  # raw tool output snippet
     remediation: str = ""
+    attack_path_steps: list[str] = Field(default_factory=list)
+    impact_assessment: str = ""
+    remediation_guidance: str = ""
     related_finding_ids: list[str] = Field(default_factory=list)
     discovered_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -129,7 +132,7 @@ class TaskRecord(BaseModel):
 # ── Plan models ────────────────────────────────────────────────────────────────
 
 
-class PlanStepStatus(str, Enum):
+class PlanStepStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     DONE = "done"
@@ -225,6 +228,9 @@ CREATE_TABLES_SQL: list[str] = [
         tool_source         TEXT NOT NULL DEFAULT '',
         raw_evidence        TEXT NOT NULL DEFAULT '',
         remediation         TEXT NOT NULL DEFAULT '',
+        attack_path_steps   TEXT NOT NULL DEFAULT '[]',  -- JSON array
+        impact_assessment   TEXT NOT NULL DEFAULT '',
+        remediation_guidance TEXT NOT NULL DEFAULT '',
         related_finding_ids TEXT NOT NULL DEFAULT '[]',  -- JSON array
         discovered_at       TEXT NOT NULL,
         updated_at          TEXT NOT NULL

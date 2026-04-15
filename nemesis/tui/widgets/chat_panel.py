@@ -36,9 +36,9 @@ class ChatMessage:
 # Role rendering config: (prefix, prefix_color, text_color)
 _ROLE_STYLE: dict[MessageRole, tuple[str, str, str]] = {
     MessageRole.NEMESIS: ("[nemesis]", "#007a9e", "#00d4ff"),
-    MessageRole.USER:    ("[you]    ", "#333355", "#c8c8d8"),
-    MessageRole.SYSTEM:  ("[system] ", "#333333", "#555570"),
-    MessageRole.AGENT:   ("[agent]  ", "#1a3a1a", "#444460"),
+    MessageRole.USER: ("[you]    ", "#333355", "#c8c8d8"),
+    MessageRole.SYSTEM: ("[system] ", "#333333", "#555570"),
+    MessageRole.AGENT: ("[agent]  ", "#1a3a1a", "#444460"),
 }
 
 _AGENT_BURST_LIMIT = 200

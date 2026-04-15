@@ -107,9 +107,7 @@ class ContextPanel(Widget):
         if total > 0:
             text.append("\n  FINDINGS\n", style="#555570")
             if project.findings_critical:
-                text.append(
-                    f"  ● {project.findings_critical} CRITICAL\n", style="bold #ff2040"
-                )
+                text.append(f"  ● {project.findings_critical} CRITICAL\n", style="bold #ff2040")
             if project.findings_high:
                 text.append(f"  ● {project.findings_high} HIGH\n", style="#ff6040")
             if project.findings_medium:

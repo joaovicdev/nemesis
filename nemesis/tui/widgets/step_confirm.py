@@ -13,6 +13,8 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Input, Static
 
+from nemesis.core.config import config
+from nemesis.core.wordlists import KALI_DEFAULT_SENTINEL, suggest_ffuf_wordlist_display
 from nemesis.db.models import PlanStep
 
 logger = logging.getLogger(__name__)
@@ -54,18 +56,28 @@ class StepConfirmWidget(Widget):
             self.step_id = step_id
             self.new_target = new_target
 
+    class WordlistEdited(Message):
+        """Posted when the user edits the step wordlist."""
+
+        def __init__(self, step_id: str, new_wordlist: str) -> None:
+            super().__init__()
+            self.step_id = step_id
+            self.new_wordlist = new_wordlist
+
     # ── Bindings ────────────────────────────────────────────────────────────
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("y", "run_step", "Run"),
         Binding("s", "skip_step", "Skip"),
         Binding("e", "edit_args", "Edit args"),
+        Binding("w", "edit_wordlist", "Edit wordlist"),
         Binding("x", "abort_plan", "Abort"),
     ]
 
     can_focus: bool = True
 
     _editing: reactive[bool] = reactive(False)
+    _edit_field: reactive[str] = reactive("target")
 
     DEFAULT_CSS = """
     StepConfirmWidget {
@@ -113,6 +125,15 @@ class StepConfirmWidget(Widget):
         extra_args = step.args.get("extra_args", [])
         args_str = " ".join(str(a) for a in extra_args) if extra_args else "—"
         reason = step.description
+        wordlist_display = ""
+        if "ffuf" in step.required_tools or step.agent == "ffuf_agent":
+            wl_pref = step.args.get("wordlist")
+            pref = (
+                str(wl_pref)
+                if isinstance(wl_pref, str) and wl_pref.strip()
+                else KALI_DEFAULT_SENTINEL
+            )
+            wordlist_display = suggest_ffuf_wordlist_display(pref, config.default_ffuf_wordlist)
 
         text = Text()
         text.append("⚡ NEXT STEP  ", style="bold #ffd700")
@@ -130,6 +151,8 @@ class StepConfirmWidget(Widget):
         field("Tool:", first_tool, "#00d4ff")
         field("Target:", target)
         field("Args:", args_str)
+        if wordlist_display:
+            field("Wordlist:", wordlist_display)
 
         if reason:
             wrapped = reason[:80] + ("…" if len(reason) > 80 else "")
@@ -156,6 +179,10 @@ class StepConfirmWidget(Widget):
         text.append("[E] ", style="bold #00d4ff")
         text.append("Edit args", style="#c8c8d8")
         text.append("    ", style="#555570")
+        if wordlist_display:
+            text.append("[W] ", style="bold #00d4ff")
+            text.append("Edit wordlist", style="#c8c8d8")
+            text.append("    ", style="#555570")
         text.append("[X] ", style="bold #ff2040")
         text.append("Abort", style="#c8c8d8")
 
@@ -201,16 +228,36 @@ class StepConfirmWidget(Widget):
         edit_input = self.query_one("#confirm-edit-input", Input)
         edit_input.styles.display = "block"
         edit_input.value = target
+        edit_input.placeholder = "new target — press enter to confirm"
         edit_input.focus()
+        self._edit_field = "target"
+        self._editing = True
+
+    def action_edit_wordlist(self) -> None:
+        if self._editing:
+            return
+        if "ffuf" not in self._step.required_tools and self._step.agent != "ffuf_agent":
+            return
+        current = self._step.args.get("wordlist", KALI_DEFAULT_SENTINEL)
+        edit_input = self.query_one("#confirm-edit-input", Input)
+        edit_input.styles.display = "block"
+        edit_input.value = str(current)
+        edit_input.placeholder = "new wordlist path (or kali_default) — press enter to confirm"
+        edit_input.focus()
+        self._edit_field = "wordlist"
         self._editing = True
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if not self._editing:
             return
-        new_target = event.value.strip()
-        if new_target:
-            self._step.args["target"] = new_target
-            self.post_message(self.ArgsEdited(self._step.id, new_target))
+        value = event.value.strip()
+        if value:
+            if self._edit_field == "wordlist":
+                self._step.args["wordlist"] = value
+                self.post_message(self.WordlistEdited(self._step.id, value))
+            else:
+                self._step.args["target"] = value
+                self.post_message(self.ArgsEdited(self._step.id, value))
         self._cancel_edit()
 
     def _cancel_edit(self) -> None:

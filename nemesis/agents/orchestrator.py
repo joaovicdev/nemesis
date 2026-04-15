@@ -29,8 +29,14 @@ from nemesis.agents.executor import (
 from nemesis.agents.llm_client import LLMClient, LLMError
 from nemesis.agents.planner import PlannerAgent
 from nemesis.agents.specialized import get_agent
+from nemesis.core.config import config
 from nemesis.core.logging_config import set_session_id
 from nemesis.core.project import ProjectContext
+from nemesis.core.wordlists import (
+    KALI_DEFAULT_SENTINEL,
+    resolve_ffuf_wordlist,
+    suggest_ffuf_wordlist_display,
+)
 from nemesis.db.database import Database
 from nemesis.db.models import (
     AttackPlan,
@@ -398,6 +404,24 @@ class Orchestrator:
 
         Falls back to _execute_tool() if the agent name is not registered.
         """
+        if "ffuf" in step.required_tools or step.agent == "ffuf_agent":
+            step.args.setdefault("wordlist", KALI_DEFAULT_SENTINEL)
+            try:
+                resolved = resolve_ffuf_wordlist(
+                    str(step.args.get("wordlist") or KALI_DEFAULT_SENTINEL),
+                    config.default_ffuf_wordlist,
+                )
+            except FileNotFoundError:
+                resolved = None
+            logger.info(
+                "Resolved ffuf wordlist",
+                extra={
+                    "event": "orchestrator.ffuf_wordlist_resolved",
+                    "step_id": step.id,
+                    "wordlist": resolved or "",
+                },
+            )
+
         try:
             agent_cls = get_agent(step.agent)
         except ValueError:
@@ -597,10 +621,23 @@ class Orchestrator:
             "target",
             self._context.project.targets[0] if self._context.project.targets else "?",
         )
+        extra_line = ""
+        if "ffuf" in step.required_tools or step.agent == "ffuf_agent":
+            step.args.setdefault("wordlist", KALI_DEFAULT_SENTINEL)
+            suggested = suggest_ffuf_wordlist_display(
+                str(step.args.get("wordlist") or KALI_DEFAULT_SENTINEL),
+                config.default_ffuf_wordlist,
+            )
+            extra_line = (
+                f"\n\nWordlist suggestion: `{suggested}`\n"
+                "You can press **W** in the step card to edit it before running."
+            )
+
         return OrchestratorResponse(
             text=(
                 f"Next step: **{step.name}**\n"
-                f"Run `{first_tool}` on `{target}`?\n\n"
+                f"Run `{first_tool}` on `{target}`?"
+                f"{extra_line}\n\n"
                 "**Continue? (y/n)**"
             ),
             requires_confirmation=True,

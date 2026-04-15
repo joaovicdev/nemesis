@@ -62,6 +62,12 @@ class NemesisConfig(BaseSettings):
     whois_path: str = Field(default="whois")
     dig_path: str = Field(default="dig")
     curl_path: str = Field(default="curl")
+    default_ffuf_wordlist: str | None = Field(
+        default=None,
+        description=(
+            "Default absolute ffuf wordlist path to use when a plan step does not specify one."
+        ),
+    )
 
     # ── Behaviour ─────────────────────────────────────────────────────────
     default_mode: str = Field(

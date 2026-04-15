@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from nemesis.agents.specialized.base import BaseSpecializedAgent
 from nemesis.agents.specialized.enumeration import EnumerationAgent
+from nemesis.agents.specialized.ffuf import FfufAgent
 from nemesis.agents.specialized.nuclei import NucleiAgent
 from nemesis.agents.specialized.recon import ReconAgent
 from nemesis.agents.specialized.scanning import ScanningAgent
@@ -24,6 +25,7 @@ AGENT_REGISTRY: dict[str, type[BaseSpecializedAgent]] = {
     "enumeration_agent": EnumerationAgent,
     "vulnerability_agent": VulnerabilityAgent,
     "nuclei_agent": NucleiAgent,
+    "ffuf_agent": FfufAgent,
 }
 
 _KNOWN_NAMES = list(AGENT_REGISTRY.keys())
@@ -52,6 +54,7 @@ __all__ = [
     "AGENT_REGISTRY",
     "BaseSpecializedAgent",
     "EnumerationAgent",
+    "FfufAgent",
     "NucleiAgent",
     "ReconAgent",
     "ScanningAgent",

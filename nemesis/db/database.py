@@ -49,6 +49,7 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._initialize_schema()
+        await self._ensure_schema_patches()
         logger.info(
             "Database opened",
             extra={"event": "db.opened", "path": str(self._path)},
@@ -64,6 +65,36 @@ class Database:
         for statement in CREATE_TABLES_SQL:
             await self._conn.execute(statement)
         await self._conn.commit()
+
+    async def _ensure_schema_patches(self) -> None:
+        """
+        Apply additive schema patches for older databases.
+
+        NEMESIS currently uses idempotent, additive ALTER TABLE patches rather than
+        versioned migrations. This keeps upgrades safe for local-only SQLite installs.
+        """
+        assert self._conn
+
+        async def _existing_columns(table: str) -> set[str]:
+            async with self._conn.execute(f"PRAGMA table_info({table})") as cur:
+                rows = await cur.fetchall()
+            return {str(r["name"]) for r in rows}
+
+        cols = await _existing_columns("findings")
+        patches: list[tuple[str, str]] = [
+            ("attack_path_steps", "TEXT NOT NULL DEFAULT '[]'"),
+            ("impact_assessment", "TEXT NOT NULL DEFAULT ''"),
+            ("remediation_guidance", "TEXT NOT NULL DEFAULT ''"),
+        ]
+
+        applied = 0
+        for name, ddl in patches:
+            if name in cols:
+                continue
+            await self._conn.execute(f"ALTER TABLE findings ADD COLUMN {name} {ddl}")
+            applied += 1
+        if applied:
+            await self._conn.commit()
 
     @asynccontextmanager
     async def _cursor(self) -> AsyncIterator[aiosqlite.Cursor]:
@@ -228,8 +259,9 @@ class Database:
                     INSERT INTO findings (
                         id, project_id, session_id, title, description, severity, status,
                         confidence, target, port, service, cve_ids, tool_source,
-                        raw_evidence, remediation, related_finding_ids, discovered_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        raw_evidence, remediation, attack_path_steps, impact_assessment,
+                        remediation_guidance, related_finding_ids, discovered_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         finding.id,
@@ -247,6 +279,9 @@ class Database:
                         finding.tool_source,
                         finding.raw_evidence,
                         finding.remediation,
+                        json.dumps(finding.attack_path_steps),
+                        finding.impact_assessment,
+                        finding.remediation_guidance,
                         json.dumps(finding.related_finding_ids),
                         finding.discovered_at.isoformat(),
                         finding.updated_at.isoformat(),
@@ -452,6 +487,7 @@ def _row_to_session(row: aiosqlite.Row) -> Session:
 
 
 def _row_to_finding(row: aiosqlite.Row) -> Finding:
+    keys = set(row.keys())
     return Finding(
         id=row["id"],
         project_id=row["project_id"],
@@ -468,6 +504,13 @@ def _row_to_finding(row: aiosqlite.Row) -> Finding:
         tool_source=row["tool_source"],
         raw_evidence=row["raw_evidence"],
         remediation=row["remediation"],
+        attack_path_steps=(
+            json.loads(row["attack_path_steps"]) if "attack_path_steps" in keys else []
+        ),
+        impact_assessment=row["impact_assessment"] if "impact_assessment" in keys else "",
+        remediation_guidance=(
+            row["remediation_guidance"] if "remediation_guidance" in keys else ""
+        ),
         related_finding_ids=json.loads(row["related_finding_ids"]),
         discovered_at=datetime.fromisoformat(row["discovered_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),

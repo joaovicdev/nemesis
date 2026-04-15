@@ -113,6 +113,7 @@ class BaseSpecializedAgent(ABC):
         tool: str = action.tool or default_tool
         thought: str = action.thought or f"Executing step {step.id}"
         args: list[str] = list(str(v) for v in action.args.values()) if action.args else []
+        args = self._merge_executor_cli_args(step, tool, args)
         next_step: str | None = action.next_step
 
         # Guard: only allow tools within the step's declared scope
@@ -178,8 +179,7 @@ class BaseSpecializedAgent(ABC):
         finding_summary = (
             f"{len(findings)} finding(s): "
             + ", ".join(
-                f"{f.service or f.title} [{f.port}]" if f.port else f.title
-                for f in findings[:5]
+                f"{f.service or f.title} [{f.port}]" if f.port else f.title for f in findings[:5]
             )
             if findings
             else "no findings extracted"
@@ -264,6 +264,11 @@ class BaseSpecializedAgent(ABC):
     def _fallback_action(self, step: PlanStep, target: str) -> AgentResponse:
         """Return a safe default AgentResponse when the LLM is unreachable."""
         ...
+
+    def _merge_executor_cli_args(self, step: PlanStep, tool: str, llm_cli: list[str]) -> list[str]:
+        """Hook to merge/override executor CLI args before execution."""
+        _ = step, tool
+        return llm_cli
 
     # ── Internal helpers ───────────────────────────────────────────────────
 

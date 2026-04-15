@@ -17,16 +17,9 @@ from nemesis.db.models import Project, Session
 
 logger = logging.getLogger(__name__)
 
-_HEADER = (
-    "  [bold #00d4ff]◈ NEMESIS[/]"
-    "  [#1a1a3a]│[/]"
-    "  [#555570]ENGAGEMENTS[/]"
-)
+_HEADER = "  [bold #00d4ff]◈ NEMESIS[/]  [#1a1a3a]│[/]  [#555570]ENGAGEMENTS[/]"
 
-_EMPTY_MSG = (
-    "  No saved projects found.\n\n"
-    "  Press [bold #00d4ff]n[/] to start a new engagement."
-)
+_EMPTY_MSG = "  No saved projects found.\n\n  Press [bold #00d4ff]n[/] to start a new engagement."
 
 
 class _ProjectRow(Static):

@@ -10,12 +10,14 @@ Pipeline per executor result:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import shutil
 import uuid
 from datetime import datetime
 
-from nemesis.agents.executor import ExecutorResult
+from nemesis.agents.executor import ExecutorResult, ToolNotFoundError, get_executor
 from nemesis.agents.llm_client import LLMClient, LLMError
 from nemesis.core.project import ProjectContext
 from nemesis.db.models import Finding, FindingSeverity, FindingStatus
@@ -26,10 +28,15 @@ _AUTO_DISMISS_BELOW = 0.25
 _NEEDS_REVIEW_BELOW = 0.60
 
 _RAW_OUTPUT_CAP = 4000
+_SEARCHSPLOIT_CAP = 5  # max exploits per CVE to avoid bloating the finding
 
 _ANALYST_SYSTEM = (
-    "You are a penetration testing analyst. "
-    "Extract security-relevant findings from raw tool output. "
+    "You are a penetration testing analyst in an authorized assessment platform. "
+    "Extract security-relevant findings from raw tool output and write them in a defensive, "
+    "report-ready tone. "
+    "Do not include credentials, exploit payloads, or instructions aimed at harming third parties. "
+    "Focus on threat modeling: attacker prerequisites, abuse path at a high level, impact, and "
+    "practical remediation guidance. "
     "Reply with valid JSON only — no markdown, no explanation outside the JSON."
 )
 
@@ -46,12 +53,16 @@ Extract every security-relevant finding from the output above.
 For each finding include:
   - title: short descriptive name
   - description: what was found and why it matters
+  - attack_path_steps: list of ordered steps explaining how an attacker could abuse this finding
+    in an authorized test (high-level, no payloads/credentials)
+  - impact_assessment: short impact analysis (confidentiality/integrity/availability + practical abuse)
   - severity: "critical" | "high" | "medium" | "low" | "info"
   - confidence: float 0.0–1.0 (how certain you are this is a real finding)
   - port: port number as string, or "" if not applicable
   - service: service name (e.g. "ssh", "http"), or ""
   - cve_ids: list of CVE IDs if known, e.g. ["CVE-2021-1234"], or []
-  - remediation: brief remediation advice, or ""
+  - remediation: brief executive remediation summary (1–3 sentences), or ""
+  - remediation_guidance: detailed remediation checklist and verification steps, or ""
 
 Reply with this exact JSON structure:
 {{
@@ -59,12 +70,15 @@ Reply with this exact JSON structure:
     {{
       "title": "...",
       "description": "...",
+      "attack_path_steps": ["...", "..."],
+      "impact_assessment": "...",
       "severity": "info",
       "confidence": 0.8,
       "port": "22",
       "service": "ssh",
       "cve_ids": [],
       "remediation": "..."
+      "remediation_guidance": "..."
     }}
   ]
 }}
@@ -172,6 +186,8 @@ class AnalystAgent:
             self._correlate(finding)
             findings.append(finding)
 
+        await self._enrich_with_exploits(findings)
+
         logger.info(
             "Analyst findings extracted",
             extra={
@@ -183,6 +199,70 @@ class AnalystAgent:
             },
         )
         return findings
+
+    async def _enrich_with_exploits(self, findings: list[Finding]) -> None:
+        """
+        For each finding that has CVE IDs, query searchsploit locally and append any
+        found exploit references to the finding's description and remediation.
+
+        Mutates findings in-place. If searchsploit is not installed, returns without
+        error (ToolNotFoundError from run() is also ignored per CVE).
+        """
+        if not shutil.which("searchsploit"):
+            logger.debug(
+                "searchsploit not found on PATH — skipping exploit enrichment",
+                extra={"event": "analyst.searchsploit_not_found"},
+            )
+            return
+
+        for finding in findings:
+            if not finding.cve_ids:
+                continue
+
+            exploit_refs: list[str] = []
+            for cve in finding.cve_ids[:3]:
+                try:
+                    executor = get_executor("searchsploit", "enrich", cve)
+                    exec_result = await executor.run()
+                except (ToolNotFoundError, ValueError):
+                    continue
+
+                if not exec_result.stdout.strip():
+                    continue
+
+                try:
+                    data = json.loads(exec_result.stdout)
+                except json.JSONDecodeError:
+                    continue
+
+                exploits = data.get("RESULTS_EXPLOIT", [])
+                if not isinstance(exploits, list):
+                    continue
+                for exp in exploits[:_SEARCHSPLOIT_CAP]:
+                    if not isinstance(exp, dict):
+                        continue
+                    title = exp.get("Title", "")
+                    edb_id = exp.get("EDB-ID", "")
+                    exp_type = exp.get("Type", "")
+                    if title and edb_id:
+                        exploit_refs.append(f"EDB-{edb_id} [{exp_type}]: {title}")
+
+            if exploit_refs:
+                refs_text = "\n".join(f"  • {r}" for r in exploit_refs)
+                finding.description += f"\n\nKnown exploits:\n{refs_text}"
+                finding.remediation = (
+                    f"Patch immediately — public exploits exist. {finding.remediation}"
+                    if finding.remediation
+                    else "Patch immediately — public exploits exist."
+                )
+                finding.updated_at = datetime.utcnow()
+                logger.info(
+                    "Finding enriched with exploit references",
+                    extra={
+                        "event": "analyst.exploit_refs_added",
+                        "exploit_count": len(exploit_refs),
+                    },
+                )
 
     # ── LLM extraction ─────────────────────────────────────────────────────
 
@@ -242,6 +322,11 @@ class AnalystAgent:
         except ValueError:
             severity = FindingSeverity.INFO
 
+        attack_steps_raw = candidate.get("attack_path_steps", [])
+        attack_steps: list[str] = []
+        if isinstance(attack_steps_raw, list):
+            attack_steps = [str(s) for s in attack_steps_raw if str(s).strip()]
+
         return Finding(
             id=str(uuid.uuid4()),
             project_id=self._context.project.id,
@@ -258,6 +343,9 @@ class AnalystAgent:
             tool_source=result.tool,
             raw_evidence=result.stdout[:2000],
             remediation=str(candidate.get("remediation", "")),
+            attack_path_steps=attack_steps,
+            impact_assessment=str(candidate.get("impact_assessment", "")),
+            remediation_guidance=str(candidate.get("remediation_guidance", "")),
             discovered_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
@@ -296,6 +384,7 @@ def _regex_fallback(result: ExecutorResult) -> list[dict[str, object]]:
     - nmap: open port lines → one INFO/MEDIUM/HIGH finding per port
     - amass: subdomain lines → one INFO finding per discovered subdomain
     - nuclei: silent CLI lines → one finding per template match
+    - ffuf: JSON results array → one finding per matched URL
     """
     if result.tool == "nmap":
         return _parse_nmap_ports(result.stdout)
@@ -303,6 +392,8 @@ def _regex_fallback(result: ExecutorResult) -> list[dict[str, object]]:
         return _parse_amass_output(result.stdout)
     if result.tool == "nuclei":
         return _parse_nuclei_output(result.stdout)
+    if result.tool == "ffuf":
+        return _parse_ffuf_output(result.stdout)
     return []
 
 
@@ -355,6 +446,75 @@ def _parse_amass_output(stdout: str) -> list[dict[str, object]]:
         }
         for sub in subdomains
     ]
+
+
+def _parse_ffuf_output(stdout: str) -> list[dict[str, object]]:
+    """Parse ffuf JSON output into finding candidates."""
+    candidates: list[dict[str, object]] = []
+    start = stdout.find("{")
+    if start < 0:
+        return []
+    try:
+        data, _ = json.JSONDecoder().raw_decode(stdout[start:])
+    except json.JSONDecodeError:
+        return []
+
+    results = data.get("results", [])
+    if not isinstance(results, list):
+        return []
+
+    sensitive_keywords = {
+        "admin",
+        "login",
+        "wp-admin",
+        "phpmyadmin",
+        "config",
+        "backup",
+        "api",
+        ".git",
+        ".env",
+        "console",
+        "manager",
+        "dashboard",
+    }
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url", "") or "")
+        if not url:
+            continue
+        status = item.get("status", 0)
+        length = item.get("length", 0)
+        words = item.get("words", 0)
+
+        path = url.rsplit("/", 1)[-1].lower() if "/" in url else url.lower()
+        is_sensitive = any(kw in path for kw in sensitive_keywords)
+        severity = "medium" if is_sensitive else "info"
+        confidence = 0.75 if is_sensitive else 0.55
+        port = "443" if url.lower().startswith("https://") else "80"
+
+        candidates.append(
+            {
+                "title": f"Web path discovered: {url}",
+                "description": (
+                    f"ffuf found accessible path '{url}' "
+                    f"(HTTP {status}, {length} bytes, {words} words)."
+                ),
+                "severity": severity,
+                "confidence": confidence,
+                "port": port,
+                "service": "http",
+                "cve_ids": [],
+                "remediation": (
+                    f"Review '{url}' for sensitive data exposure or unauthorized access."
+                    if is_sensitive
+                    else f"Verify that '{url}' should be publicly accessible."
+                ),
+            }
+        )
+
+    return candidates
 
 
 def _parse_nuclei_output(stdout: str) -> list[dict[str, object]]:

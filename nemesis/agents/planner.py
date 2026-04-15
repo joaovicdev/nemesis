@@ -20,9 +20,12 @@ Rules:
 - Output valid JSON only — no markdown fences, no extra text outside the JSON object.
 - Each step must have a unique id in the format "step-NNN" (zero-padded, starting at 001).
 - depends_on must only reference ids of earlier steps in the same plan.
-- required_tools must be a subset of: ["nmap", "whois", "dig", "gobuster", "nikto", "nuclei"].
-- agent must be one of: "recon_agent", "scanning_agent", "enumeration_agent", "vulnerability_agent", "nuclei_agent".
+- required_tools must be a subset of: ["nmap", "whois", "dig", "gobuster", "nikto", "nuclei", "ffuf"].
+- agent must be one of: "recon_agent", "scanning_agent", "enumeration_agent", "vulnerability_agent", "nuclei_agent", "ffuf_agent".
 - Keep the plan focused: 3–7 steps covering the full engagement lifecycle.
+
+For ffuf steps (agent == "ffuf_agent"), args MAY include:
+  - "wordlist": "kali_default" or an absolute filesystem path to a wordlist.
 
 Output schema (strict):
 {
@@ -72,12 +75,12 @@ _DEFAULT_PLAN_STEPS: list[dict] = [
     },
     {
         "id": "step-003",
-        "name": "Web Directory Brute-Force",
-        "description": "Discover hidden web paths and admin panels.",
-        "required_tools": ["gobuster"],
+        "name": "Web Directory Fuzzing",
+        "description": "Fast discovery of hidden web paths, admin panels, and API endpoints.",
+        "required_tools": ["ffuf"],
         "depends_on": ["step-002"],
-        "agent": "enumeration_agent",
-        "args": {},
+        "agent": "ffuf_agent",
+        "args": {"wordlist": "kali_default"},
     },
 ]
 
@@ -86,7 +89,7 @@ class PlannerAgent:
     """
     Generates a structured AttackPlan for the current project via LLM.
 
-    Falls back to a hardcoded 3-step default plan (whois → nmap → gobuster)
+    Falls back to a hardcoded 3-step default plan (whois → nmap → ffuf)
     when the LLM is unavailable or returns an invalid response.
     """
 

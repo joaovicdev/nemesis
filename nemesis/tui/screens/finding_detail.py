@@ -154,6 +154,27 @@ class FindingDetailScreen(ModalScreen[str | None]):
         text.append("\n  Description:\n", style="#555570")
         text.append(f"  {f.description}\n", style="#c8c8d8")
 
+        has_attack_steps = bool(getattr(f, "attack_path_steps", []))
+        has_impact = bool(getattr(f, "impact_assessment", "").strip())
+        has_guidance = bool(getattr(f, "remediation_guidance", "").strip())
+        if has_attack_steps or has_impact or has_guidance:
+            text.append("\n  Attacker vector:\n", style="#555570")
+
+            if has_attack_steps:
+                text.append("  Attack path:\n", style="#555570")
+                for idx, step in enumerate(f.attack_path_steps, start=1):  # type: ignore[attr-defined]
+                    text.append(f"    {idx}. {step}\n", style="#c8c8d8")
+            if has_impact:
+                text.append("\n  Impact:\n", style="#555570")
+                text.append(f"  {f.impact_assessment}\n", style="#c8c8d8")  # type: ignore[attr-defined]
+            if has_guidance:
+                text.append("\n  Remediation (detailed):\n", style="#555570")
+                text.append(f"  {f.remediation_guidance}\n", style="#c8c8d8")  # type: ignore[attr-defined]
+            else:
+                if f.remediation:
+                    text.append("\n  Remediation (detailed):\n", style="#555570")
+                    text.append("  See remediation summary above.\n", style="#c8c8d8")
+
         if f.remediation:
             text.append("\n  Remediation:\n", style="#555570")
             text.append(f"  {f.remediation}\n", style="#c8c8d8")

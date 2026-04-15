@@ -14,6 +14,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from nemesis.core.config import config
+from nemesis.core.wordlists import resolve_ffuf_wordlist
+
 logger = logging.getLogger(__name__)
 
 
@@ -279,6 +282,40 @@ class NiktoExecutor(BaseExecutor):
         return [binary, "-h", self.target, "-Format", "txt", *self.extra_args]
 
 
+class FfufExecutor(BaseExecutor):
+    """Runs ffuf for fast web content discovery and fuzzing."""
+
+    TOOL_NAME = "ffuf"
+    TOOL_BINARY = "ffuf"
+    DESTRUCTIVE = False
+
+    def _build_command(self, binary: str) -> list[str]:
+        has_wordlist = any(a == "-w" or a.startswith("-w") for a in self.extra_args)
+
+        target_url = self.target
+        if not target_url.startswith(("http://", "https://")):
+            target_url = f"http://{target_url}"
+
+        cmd = [
+            binary,
+            "-u",
+            f"{target_url}/FUZZ",
+            "-mc",
+            "all",
+            "-ac",
+            "-of",
+            "json",
+            "-o",
+            "/dev/stdout",
+            "-s",
+        ]
+
+        if not has_wordlist:
+            cmd += ["-w", resolve_ffuf_wordlist(None, config.default_ffuf_wordlist)]
+
+        return cmd + self.extra_args
+
+
 class DigExecutor(BaseExecutor):
     """Runs DNS enumeration with dig."""
 
@@ -300,6 +337,23 @@ class AmassExecutor(BaseExecutor):
     def _build_command(self, binary: str) -> list[str]:
         base = [binary, "enum", "-passive", "-d", self.target]
         return base + self.extra_args
+
+
+class SearchsploitExecutor(BaseExecutor):
+    """Runs searchsploit to find known exploits for a CVE or keyword."""
+
+    TOOL_NAME = "searchsploit"
+    TOOL_BINARY = "searchsploit"
+    DESTRUCTIVE = False
+
+    def _build_command(self, binary: str) -> list[str]:
+        return [
+            binary,
+            "--json",
+            "--disable-colour",
+            self.target,
+            *self.extra_args,
+        ]
 
 
 class NucleiExecutor(BaseExecutor):
@@ -332,8 +386,10 @@ EXECUTOR_REGISTRY: dict[str, type[BaseExecutor]] = {
     "whois": WhoisExecutor,
     "gobuster": GobusterExecutor,
     "nikto": NiktoExecutor,
+    "ffuf": FfufExecutor,
     "dig": DigExecutor,
     "amass": AmassExecutor,
+    "searchsploit": SearchsploitExecutor,
     "nuclei": NucleiExecutor,
 }
 

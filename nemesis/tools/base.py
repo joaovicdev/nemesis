@@ -12,7 +12,7 @@ class ToolDefinition:
     name: str
     binary: str
     description: str
-    phase: str          # which pentest phase this tool belongs to
+    phase: str  # which pentest phase this tool belongs to
     destructive: bool = False
     requires_root: bool = False
     tags: list[str] = field(default_factory=list)
