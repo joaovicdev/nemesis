@@ -230,7 +230,10 @@ class ProjectContext:
             lines.append(f"Out of scope: {', '.join(self.project.out_of_scope)}")
 
         if self.project.context:
-            lines.append(f"Engagement context: {self.project.context}")
+            lines.append(f"Engagement / client context: {self.project.context}")
+
+        if self.project.pentest_goals:
+            lines.append(f"Pentest goals (user): {self.project.pentest_goals}")
 
         lines.append(
             f"Findings so far: {len(validated)} validated "

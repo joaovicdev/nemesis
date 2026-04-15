@@ -96,6 +96,13 @@ class Database:
         if applied:
             await self._conn.commit()
 
+        proj_cols = await _existing_columns("projects")
+        if "pentest_goals" not in proj_cols:
+            await self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN pentest_goals TEXT NOT NULL DEFAULT ''"
+            )
+            await self._conn.commit()
+
     @asynccontextmanager
     async def _cursor(self) -> AsyncIterator[aiosqlite.Cursor]:
         assert self._conn, "Database not connected — call connect() first"
@@ -147,8 +154,8 @@ class Database:
                 await cur.execute(
                     """
                     INSERT INTO projects
-                        (id, name, targets, out_of_scope, context, status, mode, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, name, targets, out_of_scope, context, pentest_goals, status, mode, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project.id,
@@ -156,6 +163,7 @@ class Database:
                         json.dumps(project.targets),
                         json.dumps(project.out_of_scope),
                         project.context,
+                        project.pentest_goals,
                         project.status.value,
                         project.mode.value,
                         project.created_at.isoformat(),
@@ -184,7 +192,7 @@ class Database:
                 await cur.execute(
                     """
                     UPDATE projects
-                    SET name=?, targets=?, out_of_scope=?, context=?, status=?, mode=?, updated_at=?
+                    SET name=?, targets=?, out_of_scope=?, context=?, pentest_goals=?, status=?, mode=?, updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -192,6 +200,7 @@ class Database:
                         json.dumps(project.targets),
                         json.dumps(project.out_of_scope),
                         project.context,
+                        project.pentest_goals,
                         project.status.value,
                         project.mode.value,
                         project.updated_at.isoformat(),
@@ -462,12 +471,15 @@ class Database:
 
 
 def _row_to_project(row: aiosqlite.Row) -> Project:
+    keys = set(row.keys())
+    pentest_goals = row["pentest_goals"] if "pentest_goals" in keys else ""
     return Project(
         id=row["id"],
         name=row["name"],
         targets=json.loads(row["targets"]),
         out_of_scope=json.loads(row["out_of_scope"]),
         context=row["context"],
+        pentest_goals=pentest_goals or "",
         status=row["status"],
         mode=row["mode"],
         created_at=datetime.fromisoformat(row["created_at"]),

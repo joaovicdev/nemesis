@@ -229,6 +229,7 @@ class HomeScreen(Screen[None]):
                 targets=data["targets"],
                 out_of_scope=data.get("out_of_scope", []),
                 context=data.get("context", ""),
+                pentest_goals=data.get("pentest_goals", ""),
             )
             project = await db.create_project(project)
             session = Session(project_id=project.id)

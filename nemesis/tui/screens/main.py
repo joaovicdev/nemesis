@@ -647,6 +647,7 @@ class MainScreen(Screen[None]):
                 targets=project_data["targets"],
                 out_of_scope=project_data.get("out_of_scope", []),
                 context=project_data.get("context", ""),
+                pentest_goals=project_data.get("pentest_goals", ""),
             )
             session = Session(project_id=project.id)
             await db.create_project(project)

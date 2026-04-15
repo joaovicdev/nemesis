@@ -61,6 +61,7 @@ class Project(BaseModel):
     targets: list[str]
     out_of_scope: list[str] = Field(default_factory=list)
     context: str = ""
+    pentest_goals: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
     mode: ControlMode = ControlMode.STEP
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -195,6 +196,7 @@ CREATE_TABLES_SQL: list[str] = [
         targets      TEXT NOT NULL,   -- JSON array
         out_of_scope TEXT NOT NULL DEFAULT '[]',  -- JSON array
         context      TEXT NOT NULL DEFAULT '',
+        pentest_goals TEXT NOT NULL DEFAULT '',
         status       TEXT NOT NULL DEFAULT 'active',
         mode         TEXT NOT NULL DEFAULT 'step',
         created_at   TEXT NOT NULL,

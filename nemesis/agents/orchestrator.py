@@ -176,9 +176,12 @@ class Orchestrator:
         if not targets:
             return OrchestratorResponse(text="No targets configured. Add a target first.")
 
-        goal = f"Full penetration test of {', '.join(targets)}" + (
-            f" — {self._context.project.context}" if self._context.project.context else ""
-        )
+        targets_label = ", ".join(targets)
+        pg = (self._context.project.pentest_goals or "").strip()
+        if pg:
+            goal = f"{pg} (primary targets: {targets_label})"
+        else:
+            goal = f"Authorized security assessment of {targets_label}"
 
         plan = await self._planner.generate_plan(goal)
         await self._db.create_plan(plan)

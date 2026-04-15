@@ -45,7 +45,7 @@ Output schema (strict):
 """
 
 _USER_PROMPT_TEMPLATE = """\
-Engagement context:
+Engagement summary (may include separate client context and pentest goals):
 {context_summary}
 
 Generate a full structured attack plan for the targets listed above.

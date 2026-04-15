@@ -1,4 +1,4 @@
-"""TargetInputScreen — progressive 3-step onboarding wizard shown after splash."""
+"""TargetInputScreen — progressive onboarding wizard shown after splash."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import Input, Static
+from textual.widgets import Button, Input, Static, TextArea
 
 from nemesis.db.models import Project, Session
 
@@ -28,16 +28,11 @@ _QUESTIONS = [
         "Optional — press enter to skip",
         "e.g. admin.example.com, 10.0.0.1",
     ),
-    (
-        "Project / client context",
-        "Optional — company type, objectives, constraints, rules of engagement",
-        "e.g. SaaS startup, black-box, no DoS allowed",
-    ),
 ]
 
 
 class TargetInputScreen(Screen[None]):
-    """Sequential onboarding wizard: target → out-of-scope → context."""
+    """Sequential onboarding: target → out-of-scope → client context → pentest goals."""
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "skip_all", "Skip setup", show=False),
@@ -58,7 +53,7 @@ class TargetInputScreen(Screen[None]):
     }
 
     #ti-box {
-        width: 72;
+        width: 76;
         height: auto;
         border: tall #1a1a3a;
         background: #0f0f1a;
@@ -109,6 +104,32 @@ class TargetInputScreen(Screen[None]):
         border: tall #00d4ff;
     }
 
+    #ti-context-area, #ti-goals-area {
+        width: 1fr;
+        height: 6;
+        border: tall #1a1a3a;
+        background: #141428;
+        color: #c8c8d8;
+        margin-bottom: 1;
+    }
+
+    #ti-context-area:focus, #ti-goals-area:focus {
+        border: tall #00d4ff;
+    }
+
+    #ti-continue-btn {
+        width: 100%;
+        background: #007a9e;
+        color: #0a0a0a;
+        text-style: bold;
+        border: none;
+        margin-top: 1;
+    }
+
+    #ti-continue-btn:hover {
+        background: #00d4ff;
+    }
+
     #ti-controls {
         text-align: center;
         color: #1a1a3a;
@@ -139,22 +160,99 @@ class TargetInputScreen(Screen[None]):
 
     async def _render_current_step(self) -> None:
         """Swap the contents of #ti-current for the active step."""
-        idx = self._step - 1
-        question, hint, placeholder = _QUESTIONS[idx]
         current = self.query_one("#ti-current", Vertical)
         await current.remove_children()
-        await current.mount(
-            Static(question, classes="ti-question"),
-            Static(hint, classes="ti-hint"),
-            Static("", classes="ti-error", id="ti-error"),
-            Input(placeholder=placeholder, id="ti-active-input"),
-        )
+
+        if self._step <= 2:
+            idx = self._step - 1
+            question, hint, placeholder = _QUESTIONS[idx]
+            await current.mount(
+                Static(question, classes="ti-question"),
+                Static(hint, classes="ti-hint"),
+                Static("", classes="ti-error", id="ti-error"),
+                Input(placeholder=placeholder, id="ti-active-input"),
+            )
+        elif self._step == 3:
+            saved = str(self._data.get("context", ""))
+            await current.mount(
+                Static("Client / project context", classes="ti-question"),
+                Static(
+                    "Optional — company profile, size, sector, broad restrictions, rules of engagement.",
+                    classes="ti-hint",
+                ),
+                Static("", classes="ti-error", id="ti-error"),
+                TextArea(saved, id="ti-context-area"),
+                Button("Continue", id="ti-continue-btn", variant="primary"),
+            )
+        else:
+            saved_goals = str(self._data.get("pentest_goals", ""))
+            await current.mount(
+                Static("Pentest goals", classes="ti-question"),
+                Static(
+                    "Optional — what you want to achieve in this authorized test "
+                    "(e.g. specific vulnerability class, access objective).",
+                    classes="ti-hint",
+                ),
+                Static("", classes="ti-error", id="ti-error"),
+                TextArea(
+                    saved_goals,
+                    id="ti-goals-area",
+                    placeholder="Describe your goals here",
+                ),
+                Button("Continue", id="ti-continue-btn", variant="primary"),
+            )
+
+        controls = self.query_one("#ti-controls", Static)
+        if self._step <= 2:
+            controls.update("[ enter ] confirm   [ esc ] skip setup")
+        else:
+            controls.update("[ Continue ] below   [ esc ] skip setup")
+
+        self.call_after_refresh(self._focus_active_widget)
+
+    def _focus_active_widget(self) -> None:
+        if self._step <= 2:
+            self._focus_active_input()
+        elif self._step == 3:
+            with contextlib.suppress(Exception):
+                self.query_one("#ti-context-area", TextArea).focus()
+        else:
+            with contextlib.suppress(Exception):
+                self.query_one("#ti-goals-area", TextArea).focus()
 
     def _focus_active_input(self) -> None:
         with contextlib.suppress(Exception):
             self.query_one("#ti-active-input", Input).focus()
 
     # ── Input handling ──────────────────────────────────────────────────────
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "ti-continue-btn":
+            return
+        asyncio.create_task(self._advance_multiline_step())
+
+    async def _advance_multiline_step(self) -> None:
+        if self._step == 3:
+            try:
+                ctx = self.query_one("#ti-context-area", TextArea).text.strip()
+            except Exception:
+                ctx = ""
+            self._data["context"] = ctx
+            preview = ctx if len(ctx) <= 72 else f"{ctx[:72]}…"
+            await self._append_history("Context", preview if preview else "(empty)")
+            self._step = 4
+            await self._render_current_step()
+            return
+
+        if self._step == 4:
+            try:
+                goals = self.query_one("#ti-goals-area", TextArea).text.strip()
+            except Exception:
+                goals = ""
+            self._data["pentest_goals"] = goals
+            preview = goals if len(goals) <= 72 else f"{goals[:72]}…"
+            await self._append_history("Goals", preview if preview else "(empty)")
+            await self._persist_and_go()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "ti-active-input":
@@ -199,13 +297,7 @@ class TargetInputScreen(Screen[None]):
             )
             self._step = 3
 
-        elif self._step == 3:
-            self._data["context"] = value
-            asyncio.create_task(self._persist_and_go())
-            return
-
         await self._render_current_step()
-        self._focus_active_input()
 
     def _show_error(self, msg: str) -> None:
         with contextlib.suppress(Exception):
@@ -227,6 +319,7 @@ class TargetInputScreen(Screen[None]):
         targets: list[str] = list(self._data.get("targets", []))  # type: ignore[arg-type]
         out_of_scope: list[str] = list(self._data.get("out_of_scope", []))  # type: ignore[arg-type]
         context: str = str(self._data.get("context", ""))
+        pentest_goals: str = str(self._data.get("pentest_goals", ""))
 
         try:
             db = self.app.db  # type: ignore[attr-defined]
@@ -235,6 +328,7 @@ class TargetInputScreen(Screen[None]):
                 targets=targets,
                 out_of_scope=out_of_scope,
                 context=context,
+                pentest_goals=pentest_goals,
             )
             session = Session(project_id=project.id)
             await db.create_project(project)

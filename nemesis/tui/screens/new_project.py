@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from typing import ClassVar
@@ -41,7 +42,7 @@ class NewProjectScreen(ModalScreen[dict | None]):
     """
     Modal wizard to configure a new pentest engagement.
 
-    Returns a dict with keys: name, targets, context
+    Returns a dict with keys: name, targets, out_of_scope, context, pentest_goals
     or None if the user cancelled.
     """
 
@@ -58,7 +59,7 @@ class NewProjectScreen(ModalScreen[dict | None]):
     #wizard-box {
         background: #0f0f1a;
         border: tall #1a1a3a;
-        width: 72;
+        width: 76;
         max-height: 90vh;
         height: auto;
         padding: 2 3;
@@ -101,15 +102,15 @@ class NewProjectScreen(ModalScreen[dict | None]):
         border: tall #00d4ff;
     }
 
-    #context-area {
+    #context-area, #pentest-goals-area {
         background: #141428;
         color: #c8c8d8;
         border: tall #1a1a3a;
-        height: 5;
+        height: 4;
         width: 100%;
     }
 
-    #context-area:focus {
+    #context-area:focus, #pentest-goals-area:focus {
         border: tall #00d4ff;
     }
 
@@ -230,13 +231,11 @@ class NewProjectScreen(ModalScreen[dict | None]):
         input_id = {1: "#input-targets", 2: "#input-out-of-scope"}.get(self._step)
         if input_id is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             self.query_one(input_id, Input).focus()
-        except Exception:
-            pass
 
     def _step_indicator_text(self) -> Text:
-        steps = ["TARGET", "SCOPE/CONTEXT", "CONFIRM"]
+        steps = ["TARGET", "SCOPE & DETAILS", "CONFIRM"]
         text = Text()
         for i, label in enumerate(steps, 1):
             if i < self._step:
@@ -288,18 +287,34 @@ class NewProjectScreen(ModalScreen[dict | None]):
         oos_inp.add_class("field-input")
         parent.mount(oos_inp)
 
-        parent.mount(Static("Engagement context", classes="field-label"))
+        parent.mount(Static("Client / project context", classes="field-label"))
         parent.mount(
             Static(
-                "Optional — but highly recommended.\n"
-                "Type of company, objectives, restrictions, rules of engagement.\n"
-                "This shapes how NEMESIS prioritizes and analyzes findings.",
+                "Optional — company profile, size, sector, broad restrictions, rules of engagement.\n"
+                "Helps NEMESIS interpret findings; not the same as technical pentest goals below.",
                 classes="field-hint",
             )
         )
-        saved = str(self._data.get("context", ""))
-        area = TextArea(saved, id="context-area")
-        parent.mount(area)
+        saved_ctx = str(self._data.get("context", ""))
+        parent.mount(TextArea(saved_ctx, id="context-area"))
+
+        parent.mount(Static("Pentest goals", classes="field-label"))
+        parent.mount(
+            Static(
+                "Optional — what you want to achieve in this authorized test "
+                "(e.g. critical CVE on a service, remote access, privilege escalation).\n"
+                "Drives plan focus and orchestration context.",
+                classes="field-hint",
+            )
+        )
+        saved_goals = str(self._data.get("pentest_goals", ""))
+        parent.mount(
+            TextArea(
+                saved_goals,
+                id="pentest-goals-area",
+                placeholder="Describe your goals here",
+            )
+        )
 
     def _render_step3(self, parent: Container) -> None:
         parent.mount(Static("Review & confirm", classes="field-label"))
@@ -311,6 +326,7 @@ class NewProjectScreen(ModalScreen[dict | None]):
         targets = self._data.get("targets", [])
         out_of_scope = self._data.get("out_of_scope", [])
         context = str(self._data.get("context", "")).strip()
+        pentest_goals = str(self._data.get("pentest_goals", "")).strip()
 
         summary = Text()
         summary.append("  NAME      ", style="bold #007a9e")
@@ -327,6 +343,14 @@ class NewProjectScreen(ModalScreen[dict | None]):
             lines = context.splitlines()
             summary.append(f"{lines[0]}\n", style="#c8c8d8")
             for line in lines[1:]:
+                summary.append(f"            {line}\n", style="#c8c8d8")
+        else:
+            summary.append("(none)\n", style="italic #555570")
+        summary.append("  GOALS     ", style="bold #007a9e")
+        if pentest_goals:
+            glines = pentest_goals.splitlines()
+            summary.append(f"{glines[0]}\n", style="#c8c8d8")
+            for line in glines[1:]:
                 summary.append(f"            {line}\n", style="#c8c8d8")
         else:
             summary.append("(none)\n", style="italic #555570")
@@ -394,9 +418,14 @@ class NewProjectScreen(ModalScreen[dict | None]):
             context = self.query_one("#context-area", TextArea).text.strip()
         except Exception:
             context = ""
+        try:
+            pentest_goals = self.query_one("#pentest-goals-area", TextArea).text.strip()
+        except Exception:
+            pentest_goals = ""
         self._data["out_of_scope_raw"] = oos_raw
         self._data["out_of_scope"] = _parse_targets(oos_raw) if oos_raw else []
         self._data["context"] = context
+        self._data["pentest_goals"] = pentest_goals
 
     def _finish(self) -> None:
         targets: list[str] = list(self._data.get("targets", []))  # type: ignore[arg-type]
@@ -407,6 +436,7 @@ class NewProjectScreen(ModalScreen[dict | None]):
                 "target_count": len(targets),
                 "has_out_of_scope": bool(self._data.get("out_of_scope")),
                 "has_context": bool(str(self._data.get("context", "")).strip()),
+                "has_pentest_goals": bool(str(self._data.get("pentest_goals", "")).strip()),
             },
         )
         self.dismiss(
@@ -415,6 +445,7 @@ class NewProjectScreen(ModalScreen[dict | None]):
                 "targets": targets,
                 "out_of_scope": list(self._data.get("out_of_scope", [])),  # type: ignore[arg-type]
                 "context": str(self._data.get("context", "")),
+                "pentest_goals": str(self._data.get("pentest_goals", "")),
             }
         )
 
