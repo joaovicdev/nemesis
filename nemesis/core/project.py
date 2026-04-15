@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,6 +17,45 @@ from nemesis.db.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _target_matches(candidate: str, scope_entry: str) -> bool:
+    """
+    Check whether *candidate* falls within *scope_entry*.
+
+    Handles four cases:
+      1. Exact string match (hostname, IP, domain)
+      2. Subdomain suffix match  (*.example.com)
+      3. IP address within a CIDR range
+      4. CIDR range within another CIDR range (subset)
+    """
+    candidate = candidate.strip().lower()
+    scope_entry = scope_entry.strip().lower()
+
+    if candidate == scope_entry:
+        return True
+
+    if candidate.endswith(f".{scope_entry}"):
+        return True
+
+    try:
+        scope_net = ipaddress.ip_network(scope_entry, strict=False)
+    except ValueError:
+        return False
+
+    try:
+        candidate_addr = ipaddress.ip_address(candidate)
+        return candidate_addr in scope_net
+    except ValueError:
+        pass
+
+    try:
+        candidate_net = ipaddress.ip_network(candidate, strict=False)
+        return candidate_net.subnet_of(scope_net)
+    except (ValueError, TypeError):
+        pass
+
+    return False
 
 
 @dataclass
@@ -95,15 +135,18 @@ class ProjectContext:
         """
         Check whether a target string is within the project scope.
 
-        Returns False if the target matches any out-of-scope entry (checked first).
-        Basic implementation: exact match + subdomain suffix. CIDR range matching
-        is deferred until the network utilities module is added.
+        Supports:
+          - Exact hostname / IP match
+          - Subdomain suffix match
+          - IP address within a CIDR range (e.g. 192.168.1.5 in 192.168.1.0/24)
+          - CIDR subnet within a CIDR range
+
+        Out-of-scope entries are checked first and take priority over in-scope.
         """
         target = target.strip().lower()
 
         for oos in self.project.out_of_scope:
-            oos = oos.strip().lower()
-            if target == oos or target.endswith(f".{oos}"):
+            if _target_matches(target, oos):
                 logger.debug(
                     "Scope check: out of scope",
                     extra={
@@ -114,21 +157,10 @@ class ProjectContext:
                 )
                 return False
 
-        for scope_target in self.project.targets:
-            scope_target = scope_target.strip().lower()
-            if target == scope_target:
+        for scope_entry in self.project.targets:
+            if _target_matches(target, scope_entry):
                 logger.debug(
                     "Scope check: in scope",
-                    extra={
-                        "event": "project.scope_checked",
-                        "result": "in_scope",
-                        "project_id": self.project.id,
-                    },
-                )
-                return True
-            if target.endswith(f".{scope_target}"):
-                logger.debug(
-                    "Scope check: in scope (subdomain)",
                     extra={
                         "event": "project.scope_checked",
                         "result": "in_scope",
@@ -151,7 +183,9 @@ class ProjectContext:
         """Raise ValueError if target is out of scope."""
         if not self.is_in_scope(target):
             raise ValueError(
-                f"Target '{target}' is outside the project scope: {self.project.targets}"
+                f"Target '{target}' is outside the project scope. "
+                f"Configured targets: {self.project.targets}. "
+                f"Out-of-scope: {self.project.out_of_scope}."
             )
 
     # ── Destructive action gate ───────────────────────────────────────────
