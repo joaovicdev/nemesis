@@ -871,8 +871,35 @@ class MainScreen(Screen[None]):
     # ── Other actions ──────────────────────────────────────────────────────
 
     def action_report(self) -> None:
+        if self._project_ctx is None:
+            chat = self.query_one("#chat-panel", ChatPanel)
+            chat.append_system("No active project. Load a project first.")
+            return
+        self.run_worker(
+            self._generate_report(),
+            exclusive=False,
+            name="report-generation",
+        )
+
+    async def _generate_report(self) -> None:
+        from nemesis.core.report_export import export_context_reports
+        from nemesis.tui.screens.report import ReportScreen
+
+        if self._project_ctx is None:
+            return
+
         chat = self.query_one("#chat-panel", ChatPanel)
-        chat.append_system("Report generation not yet implemented.")
+        chat.append_system("Generating report…")
+
+        try:
+            md_path, html_path = await export_context_reports(self._project_ctx)
+        except Exception:
+            logger.exception("[MainScreen] Report generation failed.")
+            chat.append_system("Report generation failed. Check logs.")
+            return
+
+        chat.append_system(f"Report saved to: {md_path}")
+        self.app.push_screen(ReportScreen(md_path, html_path))
 
     def action_toggle_panel(self) -> None:
         pass

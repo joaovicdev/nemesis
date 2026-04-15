@@ -1,5 +1,7 @@
 NEMESIS
 
+
+
 [Python](https://www.python.org)
 [License: MIT](LICENSE)
 [LiteLLM](https://github.com/BerriAI/litellm)
@@ -7,6 +9,8 @@ NEMESIS
 [Status]()
 
 **AI-assisted penetration testing, not an autonomous hacker, your expert analyst, always at your side.**
+
+
 
 ---
 

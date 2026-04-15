@@ -83,6 +83,7 @@ class HomeScreen(Screen[None]):
         Binding("down", "move_down", "Down", show=False),
         Binding("enter", "open_project", "Open", show=False),
         Binding("n", "new_project", "New Engagement"),
+        Binding("r", "report_selected_project", "Report", show=False),
         Binding("q", "quit_app", "Quit"),
     ]
 
@@ -141,6 +142,7 @@ class HomeScreen(Screen[None]):
         yield Static(
             "  [#333350]↑↓[/] [#555570]navigate[/]"
             "   [#333350]enter[/] [#555570]open[/]"
+            "   [#333350]r[/] [#555570]report[/]"
             "   [#333350]n[/] [#555570]new engagement[/]"
             "   [#333350]q[/] [#555570]quit[/]",
             id="home-footer",
@@ -200,6 +202,12 @@ class HomeScreen(Screen[None]):
             return
         project = self._projects[self._selected_idx]
         self.app.run_worker(self._load_project_and_open(project), exclusive=True)
+
+    def action_report_selected_project(self) -> None:
+        if not self._projects:
+            self.app.notify("No projects to report.", severity="warning")
+            return
+        self.app.run_worker(self._generate_report_for_selected(), exclusive=True)
 
     def action_new_project(self) -> None:
         from nemesis.tui.screens.new_project import NewProjectScreen
@@ -265,6 +273,31 @@ class HomeScreen(Screen[None]):
         from nemesis.tui.screens.main import MainScreen
 
         await self.app.switch_screen(MainScreen(project=project, session=session))
+
+    async def _generate_report_for_selected(self) -> None:
+        from nemesis.core.report_export import export_project_reports
+        from nemesis.tui.screens.report import ReportScreen
+
+        if not self._projects:
+            return
+
+        project_id = self._projects[self._selected_idx].id
+        db = self.app.db  # type: ignore[attr-defined]
+
+        self.app.notify("Generating report…", severity="information")
+        try:
+            md_path, html_path = await export_project_reports(db, project_id)
+        except ValueError:
+            logger.exception("Report export: project not found")
+            self.app.notify("Report failed: project not found.", severity="error")
+            return
+        except Exception:
+            logger.exception("Report generation failed from home screen")
+            self.app.notify("Report generation failed. Check logs.", severity="error")
+            return
+
+        self.app.notify("Report saved.", severity="information")
+        self.app.push_screen(ReportScreen(md_path, html_path))
 
     # Allow ctrl+n and ctrl+l from app-level bindings to also work on this screen
     def action_new_project_global(self) -> None:
