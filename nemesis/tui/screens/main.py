@@ -35,13 +35,7 @@ from nemesis.tui.widgets.task_list import TaskList
 
 logger = logging.getLogger(__name__)
 
-_HEADER_LOGO = (
-    "  [bold #00d4ff]NEMESIS[/]"
-    "  [#1a1a3a]│[/]"
-    "  [#555570]THE ADVERSARY[/]"
-    "  [#1a1a3a]│[/]"
-    "  [#555570]AI-Assisted Pentest Co-pilot[/]"
-)
+_HEADER_LOGO = "  [bold #00d4ff]NEMESIS[/]"
 
 
 class MainScreen(Screen[None]):
@@ -393,7 +387,7 @@ class MainScreen(Screen[None]):
         self._pending_confirmation = None
         self._active_confirm_widget_id = None
         chat = self.query_one("#chat-panel", ChatPanel)
-        self._reply_system(chat, f"Step [{event.step_id}] skipped.")
+        self._reply_system(chat, f"Step ({event.step_id}) skipped.")
         # Mark the step as skipped in task list
         task_list = self.query_one("#task-list", TaskList)
         task_list.update_task_status(event.step_id, PlanStepStatus.SKIPPED)
@@ -450,7 +444,7 @@ class MainScreen(Screen[None]):
     def on_step_confirm_widget_args_edited(self, event: StepConfirmWidget.ArgsEdited) -> None:
         """User edited a step arg — update the plan."""
         chat = self.query_one("#chat-panel", ChatPanel)
-        self._reply_system(chat, f"Target for [{event.step_id}] updated to: {event.new_target}")
+        self._reply_system(chat, f"Target for ({event.step_id}) updated to: {event.new_target}")
 
     # ── FindingCard integration ─────────────────────────────────────────────
 

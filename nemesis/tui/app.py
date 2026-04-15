@@ -27,7 +27,7 @@ class NemesisApp(App[None]):
     """Root Textual application for NEMESIS."""
 
     TITLE = "NEMESIS"
-    SUB_TITLE = "THE ADVERSARY"
+    SUB_TITLE = ""
     CSS_PATH = str(CSS_PATH)
 
     BINDINGS: ClassVar[list[Binding]] = [

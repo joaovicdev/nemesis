@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 
+from rich.errors import MarkupError
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -17,7 +18,7 @@ from textual.widgets import Input, RichLog, Static
 from textual.worker import Worker
 
 
-class MessageRole(str, Enum):
+class MessageRole(StrEnum):
     USER = "user"
     NEMESIS = "nemesis"
     SYSTEM = "system"
@@ -36,9 +37,9 @@ class ChatMessage:
 # Role rendering config: (prefix, prefix_color, text_color)
 _ROLE_STYLE: dict[MessageRole, tuple[str, str, str]] = {
     MessageRole.NEMESIS: ("[nemesis]", "#007a9e", "#00d4ff"),
-    MessageRole.USER:    ("[you]    ", "#333355", "#c8c8d8"),
-    MessageRole.SYSTEM:  ("[system] ", "#333333", "#555570"),
-    MessageRole.AGENT:   ("[agent]  ", "#1a3a1a", "#444460"),
+    MessageRole.USER: ("[you]    ", "#333355", "#c8c8d8"),
+    MessageRole.SYSTEM: ("[system] ", "#333333", "#555570"),
+    MessageRole.AGENT: ("[agent]  ", "#1a3a1a", "#444460"),
 }
 
 _AGENT_BURST_LIMIT = 200
@@ -177,7 +178,11 @@ class ChatPanel(Widget):
 
     def _append_system(self, content: str) -> None:
         log = self.query_one("#chat-log", RichLog)
-        log.write(Text(f"  {content}", style="italic #555570"))
+        markup = f"[italic #555570]  {content}[/]"
+        try:
+            log.write(Text.from_markup(markup))
+        except MarkupError:
+            log.write(Text(f"  {content}", style="italic #555570"))
 
     def append_nemesis(self, content: str) -> None:
         """Add a NEMESIS response to the chat log."""
