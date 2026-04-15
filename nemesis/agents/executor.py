@@ -290,6 +290,18 @@ class DigExecutor(BaseExecutor):
         return [binary, "ANY", self.target, *self.extra_args]
 
 
+class AmassExecutor(BaseExecutor):
+    """Runs amass subdomain enumeration."""
+
+    TOOL_NAME = "amass"
+    TOOL_BINARY = "amass"
+    DESTRUCTIVE = False
+
+    def _build_command(self, binary: str) -> list[str]:
+        base = [binary, "enum", "-passive", "-d", self.target]
+        return base + self.extra_args
+
+
 # Registry: maps tool name → executor class
 EXECUTOR_REGISTRY: dict[str, type[BaseExecutor]] = {
     "nmap": NmapExecutor,
@@ -297,6 +309,7 @@ EXECUTOR_REGISTRY: dict[str, type[BaseExecutor]] = {
     "gobuster": GobusterExecutor,
     "nikto": NiktoExecutor,
     "dig": DigExecutor,
+    "amass": AmassExecutor,
 }
 
 

@@ -14,9 +14,12 @@ import aiosqlite
 
 from nemesis.db.models import (
     CREATE_TABLES_SQL,
+    AttackPlan,
     ChatEntry,
     Finding,
     FindingStatus,
+    PlanStep,
+    PlanStepStatus,
     Project,
     Session,
     SessionPhase,
@@ -352,6 +355,73 @@ class Database:
             rows = await cur.fetchall()
         return [_row_to_task(r) for r in rows]
 
+    # ── Attack Plans ───────────────────────────────────────────────────────
+
+    async def create_plan(self, plan: AttackPlan) -> None:
+        async with self._timed("create_plan"):
+            async with self._cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO attack_plans (id, project_id, session_id, goal, steps, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        plan.id,
+                        plan.project_id,
+                        plan.session_id,
+                        plan.goal,
+                        json.dumps([s.model_dump() for s in plan.steps]),
+                        plan.created_at.isoformat(),
+                    ),
+                )
+            await self._conn.commit()  # type: ignore[union-attr]
+
+    async def get_plan(self, project_id: str) -> AttackPlan | None:
+        async with self._timed("get_plan"), self._cursor() as cur:
+            await cur.execute(
+                "SELECT * FROM attack_plans WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
+                (project_id,),
+            )
+            row = await cur.fetchone()
+        return _row_to_plan(row) if row else None
+
+    async def update_plan_step(
+        self,
+        plan_id: str,
+        step_id: str,
+        status: PlanStepStatus,
+        result_summary: str,
+        findings_count: int,
+    ) -> None:
+        async with self._timed("update_plan_step"), self._cursor() as cur:
+            await cur.execute(
+                "SELECT steps FROM attack_plans WHERE id=?",
+                (plan_id,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            logger.warning(
+                "update_plan_step: plan not found",
+                extra={"event": "db.warning", "plan_id": plan_id},
+            )
+            return
+
+        steps_raw: list[dict] = json.loads(row["steps"])
+        for step in steps_raw:
+            if step["id"] == step_id:
+                step["status"] = status.value
+                step["result_summary"] = result_summary
+                step["findings_count"] = findings_count
+                break
+
+        async with self._timed("update_plan_step_write"):
+            async with self._cursor() as cur:
+                await cur.execute(
+                    "UPDATE attack_plans SET steps=? WHERE id=?",
+                    (json.dumps(steps_raw), plan_id),
+                )
+            await self._conn.commit()  # type: ignore[union-attr]
+
 
 # ── Row deserializers ──────────────────────────────────────────────────────────
 
@@ -426,4 +496,16 @@ def _row_to_task(row: aiosqlite.Row) -> TaskRecord:
         note=row["note"],
         created_at=datetime.fromisoformat(row["created_at"]),
         completed_at=(datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None),
+    )
+
+
+def _row_to_plan(row: aiosqlite.Row) -> AttackPlan:
+    steps = [PlanStep.model_validate(s) for s in json.loads(row["steps"])]
+    return AttackPlan(
+        id=row["id"],
+        project_id=row["project_id"],
+        session_id=row["session_id"],
+        goal=row["goal"],
+        steps=steps,
+        created_at=datetime.fromisoformat(row["created_at"]),
     )

@@ -56,7 +56,7 @@ class NemesisApp(App[None]):
             extra={"event": "tui.app_stopped"},
         )
         await self.db.close()
-        await asyncio.sleep(0)  # let aiohttp finalise open connections before loop closes
+        await asyncio.sleep(0.25)  # give aiohttp time to drain open sessions before loop closes
 
     def action_new_project(self) -> None:
         from nemesis.tui.screens.new_project import NewProjectScreen

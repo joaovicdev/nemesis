@@ -82,6 +82,9 @@ _NMAP_OPEN_PORT_RE = re.compile(
 _HIGH_RISK_SERVICES = {"telnet", "ftp", "rsh", "rlogin", "rexec", "vnc", "rdp"}
 _MEDIUM_RISK_SERVICES = {"ssh", "smtp", "pop3", "imap", "snmp", "nfs", "smb", "ldap"}
 
+# amass output format: one subdomain per line, e.g. "sub.example.com"
+_AMASS_SUBDOMAIN_RE = re.compile(r"^([a-zA-Z0-9._-]+\.[a-zA-Z]{2,})$", re.MULTILINE)
+
 
 class AnalystAgent:
     """
@@ -283,9 +286,12 @@ def _regex_fallback(result: ExecutorResult) -> list[dict[str, object]]:
 
     Currently handles:
     - nmap: open port lines → one INFO/MEDIUM/HIGH finding per port
+    - amass: subdomain lines → one INFO finding per discovered subdomain
     """
     if result.tool == "nmap":
         return _parse_nmap_ports(result.stdout)
+    if result.tool == "amass":
+        return _parse_amass_output(result.stdout)
     return []
 
 
@@ -320,6 +326,24 @@ def _parse_nmap_ports(stdout: str) -> list[dict[str, object]]:
         )
 
     return candidates
+
+
+def _parse_amass_output(stdout: str) -> list[dict[str, object]]:
+    """Parse amass stdout for discovered subdomains and build candidate dicts."""
+    subdomains = _AMASS_SUBDOMAIN_RE.findall(stdout)
+    return [
+        {
+            "title": f"Subdomain discovered: {sub}",
+            "description": f"amass found subdomain {sub} via passive enumeration.",
+            "severity": "info",
+            "confidence": 0.85,
+            "port": "",
+            "service": "dns",
+            "cve_ids": [],
+            "remediation": "Review subdomain for exposed services.",
+        }
+        for sub in subdomains
+    ]
 
 
 def _severity_for_service(service: str) -> tuple[str, float]:

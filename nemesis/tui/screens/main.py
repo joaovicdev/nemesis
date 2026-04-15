@@ -1,4 +1,4 @@
-"""MainScreen — primary layout: header, left panel, chat, status bar."""
+"""MainScreen — primary layout: header, left panel, chat, agent output, cards."""
 
 from __future__ import annotations
 
@@ -14,11 +14,24 @@ from textual.widgets import Static
 
 from nemesis.agents.orchestrator import Orchestrator, OrchestratorResponse
 from nemesis.core.project import ProjectContext
-from nemesis.db.models import ChatEntry, FindingSeverity, Project, Session
+from nemesis.db.models import (
+    AttackPlan,
+    ChatEntry,
+    Finding,
+    FindingSeverity,
+    FindingStatus,
+    PlanStep,
+    PlanStepStatus,
+    Project,
+    Session,
+)
+from nemesis.tui.widgets.agent_output import AgentOutputPanel
 from nemesis.tui.widgets.chat_panel import ChatPanel
 from nemesis.tui.widgets.context_panel import ContextPanel, ProjectSummary
+from nemesis.tui.widgets.finding_card import FindingCard
 from nemesis.tui.widgets.status_bar import StatusBar
-from nemesis.tui.widgets.task_list import AttackPlan, AttackTask, TaskList, TaskStatus
+from nemesis.tui.widgets.step_confirm import StepConfirmWidget
+from nemesis.tui.widgets.task_list import TaskList
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +92,20 @@ class MainScreen(Screen[None]):
         layout: vertical;
     }
 
+    #chat-panel {
+        height: 1fr;
+    }
+
+    #cards-area {
+        background: #0a0a0a;
+        height: auto;
+        max-height: 40;
+        overflow-y: auto;
+        padding: 0 1;
+        scrollbar-color: #1a1a3a #0a0a0a;
+        scrollbar-size: 1 1;
+    }
+
     #header-bindings {
         color: #1a1a3a;
         width: auto;
@@ -97,6 +124,11 @@ class MainScreen(Screen[None]):
         self._orchestrator_busy: bool = False
         self._startup_project = project
         self._startup_session = session
+        # Step tracking for status bar
+        self._steps_done: int = 0
+        self._steps_total: int = 0
+        # Active StepConfirmWidget id when one is showing
+        self._active_confirm_widget_id: str | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main-header"):
@@ -117,6 +149,8 @@ class MainScreen(Screen[None]):
 
             with Vertical(id="right-panel"):
                 yield ChatPanel(id="chat-panel")
+                yield AgentOutputPanel(id="agent-output")
+                yield Vertical(id="cards-area")
 
         yield StatusBar(id="status-bar")
 
@@ -137,14 +171,17 @@ class MainScreen(Screen[None]):
                 name="activate-project",
             )
         else:
-            # Fresh start from splash — open the project wizard after first render
-            self.set_timer(0.05, self._open_new_project_wizard)
+            self.call_after_refresh(self._show_idle_hint)
 
-    def _open_new_project_wizard(self) -> None:
-        """Auto-open the new-project modal on first launch (no startup project given)."""
-        from nemesis.tui.screens.new_project import NewProjectScreen
-
-        self.app.push_screen(NewProjectScreen(), self._on_project_created)
+    def _show_idle_hint(self) -> None:
+        try:
+            chat = self.query_one("#chat-panel", ChatPanel)
+            chat.append_system(
+                "No project loaded. Press [bold]ctrl+n[/] to create a new engagement"
+                " or [bold]ctrl+l[/] to load an existing one."
+            )
+        except Exception:
+            pass
 
     # ── Chat routing ───────────────────────────────────────────────────────
 
@@ -171,7 +208,6 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat-panel", ChatPanel)
         lower = text.lower().strip()
 
-        # ── Shortcut commands handled without Orchestrator ─────────────────
         if lower in ("new project", "new", "n"):
             self.action_new_project()
             return
@@ -180,7 +216,7 @@ class MainScreen(Screen[None]):
             self.action_load_project()
             return
 
-        # ── Step-mode confirmation gate ────────────────────────────────────
+        # Legacy text-based step-mode gate (kept for typed "y"/"n" in chat)
         if self._pending_confirmation is not None:
             if lower in ("y", "yes", ""):
                 if self._orchestrator_busy:
@@ -189,7 +225,7 @@ class MainScreen(Screen[None]):
                 action_id = self._pending_confirmation
                 self._pending_confirmation = None
                 logger.log(  # type: ignore[attr-defined]
-                    25,  # AUDIT level
+                    25,
                     "Confirmation modal answered",
                     extra={
                         "event": "tui.confirmation_modal_answered",
@@ -207,7 +243,7 @@ class MainScreen(Screen[None]):
                 action_id = self._pending_confirmation
                 self._pending_confirmation = None
                 logger.log(  # type: ignore[attr-defined]
-                    25,  # AUDIT level
+                    25,
                     "Confirmation modal answered",
                     extra={
                         "event": "tui.confirmation_modal_answered",
@@ -220,7 +256,6 @@ class MainScreen(Screen[None]):
                 self._reply_system(chat, "Cancelled.")
                 return
 
-        # ── Route through Orchestrator if available ────────────────────────
         if self._orchestrator is not None:
             if self._orchestrator_busy:
                 self._reply_system(chat, "NEMESIS is busy — please wait a moment.")
@@ -232,14 +267,12 @@ class MainScreen(Screen[None]):
             )
             return
 
-        # ── Fallback: no project loaded yet ───────────────────────────────
         self._reply_system(
             chat,
             "No active project. Use [bold #00d4ff]ctrl+n[/] to start one.",
         )
 
     async def _route_to_orchestrator(self, text: str) -> None:
-        """Send a message through the Orchestrator and display the response."""
         if self._orchestrator is None:
             return
         self._orchestrator_busy = True
@@ -258,7 +291,6 @@ class MainScreen(Screen[None]):
             chat.set_thinking(False)
 
     async def _run_confirmed(self, action_id: str) -> None:
-        """Execute a step-mode confirmed action."""
         if self._orchestrator is None:
             return
         self._orchestrator_busy = True
@@ -282,56 +314,311 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat-panel", ChatPanel)
         self._reply_nemesis(chat, response.text)
 
+        # Render StepConfirmWidget instead of plain-text "y/n" prompt
         if response.requires_confirmation and response.confirmation_action_id:
             self._pending_confirmation = response.confirmation_action_id
             logger.debug(
-                "Confirmation modal opened",
+                "Confirmation required",
                 extra={
-                    "event": "tui.confirmation_modal_opened",
+                    "event": "tui.confirmation_required",
                     "action_id": response.confirmation_action_id,
                 },
             )
+            # If the action references a pending_step on the orchestrator, render card
+            if self._orchestrator is not None and self._orchestrator._pending_step is not None:
+                self._show_step_confirm_widget(
+                    self._orchestrator._pending_step,
+                    response.confirmation_action_id,
+                )
 
-        # Update context panel if findings were produced
-        if response.findings and self._project_ctx:
+        # Render FindingCards for any new unverified findings
+        if response.findings:
+            unverified = [f for f in response.findings if f.status == FindingStatus.UNVERIFIED]
+            for finding in unverified:
+                self._show_finding_card(finding)
             self._refresh_context_panel()
+            self._update_findings_count()
 
         # Update status bar phase if it changed
         if self._project_ctx:
             status = self.query_one("#status-bar", StatusBar)
             status.update_phase(self._project_ctx.current_phase.value.upper())
 
+    # ── StepConfirmWidget integration ──────────────────────────────────────
+
+    def _show_step_confirm_widget(self, step: PlanStep, action_id: str) -> None:
+        """Mount a StepConfirmWidget in the cards area."""
+        cards = self.query_one("#cards-area", Vertical)
+        # Remove any existing confirm widget first
+        for existing in cards.query(StepConfirmWidget):
+            existing.remove()
+
+        done_ids: list[str] = []
+        if self._orchestrator and self._orchestrator._active_plan:
+            from nemesis.db.models import PlanStepStatus as PSS
+
+            done_ids = [s.id for s in self._orchestrator._active_plan.steps if s.status == PSS.DONE]
+
+        widget = StepConfirmWidget(step, confirmed_deps=done_ids)
+        self._active_confirm_widget_id = action_id
+        cards.mount(widget)
+
+    def on_step_confirm_widget_run_step(self, event: StepConfirmWidget.RunStep) -> None:
+        """User confirmed the step via the confirm card."""
+        if self._orchestrator_busy or self._orchestrator is None:
+            return
+        action_id = self._pending_confirmation
+        if action_id is None:
+            return
+        self._pending_confirmation = None
+        self._active_confirm_widget_id = None
+        logger.log(  # type: ignore[attr-defined]
+            25,
+            "Step confirmed via StepConfirmWidget",
+            extra={
+                "event": "tui.step_confirmed",
+                "action_id": action_id,
+                "step_id": event.step_id,
+                "accepted": True,
+            },
+        )
+        self.run_worker(
+            self._run_confirmed(action_id),
+            exclusive=False,
+            name="orchestrator-call",
+        )
+
+    def on_step_confirm_widget_skip_step(self, event: StepConfirmWidget.SkipStep) -> None:
+        """User skipped the step via the confirm card."""
+        self._pending_confirmation = None
+        self._active_confirm_widget_id = None
+        chat = self.query_one("#chat-panel", ChatPanel)
+        self._reply_system(chat, f"Step [{event.step_id}] skipped.")
+        # Mark the step as skipped in task list
+        task_list = self.query_one("#task-list", TaskList)
+        task_list.update_task_status(event.step_id, PlanStepStatus.SKIPPED)
+        if self._orchestrator:
+            # Continue the plan loop with the next step
+            self.run_worker(
+                self._continue_plan_after_skip(event.step_id),
+                exclusive=False,
+                name="orchestrator-call",
+            )
+
+    async def _continue_plan_after_skip(self, skipped_step_id: str) -> None:
+        """Mark step as skipped on the orchestrator and advance the plan loop."""
+        if self._orchestrator is None:
+            return
+        # Update the step status in the active plan
+        if self._orchestrator._active_plan:
+            for step in self._orchestrator._active_plan.steps:
+                if step.id == skipped_step_id:
+                    step.status = PlanStepStatus.SKIPPED
+                    break
+        # Clear pending step and continue
+        self._orchestrator._pending_step = None
+        if self._orchestrator._loop_plan:
+            self._orchestrator_busy = True
+            chat = self.query_one("#chat-panel", ChatPanel)
+            chat.set_thinking(True)
+            try:
+                response = await self._orchestrator._pick_next_step_confirmation(
+                    self._orchestrator._loop_plan
+                )
+            except Exception:
+                logger.exception("[MainScreen] Plan continuation after skip failed.")
+            else:
+                self._on_orchestrator_response(response)
+            finally:
+                self._orchestrator_busy = False
+                chat.set_thinking(False)
+
+    def on_step_confirm_widget_abort_plan(self, _event: StepConfirmWidget.AbortPlan) -> None:
+        """User aborted the plan via the confirm card."""
+        self._pending_confirmation = None
+        self._active_confirm_widget_id = None
+        if self._orchestrator:
+            self._orchestrator.cancel_pending()
+        chat = self.query_one("#chat-panel", ChatPanel)
+        self._reply_system(chat, "Plan aborted.")
+        logger.log(  # type: ignore[attr-defined]
+            25,
+            "Plan aborted by user",
+            extra={"event": "tui.plan_aborted"},
+        )
+
+    def on_step_confirm_widget_args_edited(self, event: StepConfirmWidget.ArgsEdited) -> None:
+        """User edited a step arg — update the plan."""
+        chat = self.query_one("#chat-panel", ChatPanel)
+        self._reply_system(chat, f"Target for [{event.step_id}] updated to: {event.new_target}")
+
+    # ── FindingCard integration ─────────────────────────────────────────────
+
+    def _show_finding_card(self, finding: Finding) -> None:
+        cards = self.query_one("#cards-area", Vertical)
+        cards.mount(FindingCard(finding))
+
+    def on_finding_card_validate_finding(self, event: FindingCard.ValidateFinding) -> None:
+        self.run_worker(
+            self._persist_finding_status(event.finding_id, FindingStatus.VALIDATED),
+            exclusive=False,
+            name="finding-persist",
+        )
+        self._update_findings_count()
+        chat = self.query_one("#chat-panel", ChatPanel)
+        self._reply_system(chat, f"Finding validated: {event.finding_id[:8]}")
+
+    def on_finding_card_dismiss_finding(self, event: FindingCard.DismissFinding) -> None:
+        self.run_worker(
+            self._persist_finding_status(event.finding_id, FindingStatus.DISMISSED),
+            exclusive=False,
+            name="finding-persist",
+        )
+        self._update_findings_count()
+
+    def on_finding_card_show_finding_detail(self, event: FindingCard.ShowFindingDetail) -> None:
+        from nemesis.tui.screens.finding_detail import FindingDetailScreen
+
+        def _on_detail_result(result: str | None) -> None:
+            if result in ("validated", "dismissed"):
+                new_status = (
+                    FindingStatus.VALIDATED if result == "validated" else FindingStatus.DISMISSED
+                )
+                event.finding.status = new_status
+                self.run_worker(
+                    self._persist_finding_status(event.finding.id, new_status),
+                    exclusive=False,
+                    name="finding-persist",
+                )
+                self._update_findings_count()
+
+        self.app.push_screen(FindingDetailScreen(event.finding), _on_detail_result)
+
+    async def _persist_finding_status(self, finding_id: str, status: FindingStatus) -> None:
+        if self._project_ctx is None:
+            return
+        # Update in context
+        for finding in self._project_ctx.findings:
+            if finding.id == finding_id:
+                finding.status = status
+                break
+        # Persist to DB
+        try:
+            db = self.app.db  # type: ignore[attr-defined]
+            await db.update_finding_status(finding_id, status)
+        except Exception:
+            logger.exception("Failed to persist finding status for %s.", finding_id)
+        self._refresh_context_panel()
+
+    # ── Plan approval flow ─────────────────────────────────────────────────
+
+    def _on_plan_ready(self, plan: AttackPlan) -> None:
+        """Called by Orchestrator after PlannerAgent finishes — before execution."""
+        from nemesis.tui.screens.plan_approval import PlanApprovalScreen
+
+        # Set the plan in the task list immediately so the user sees it
+        task_list = self.query_one("#task-list", TaskList)
+        task_list.set_plan(plan)
+
+        self._steps_total = len(plan.steps)
+        self._steps_done = 0
+        status = self.query_one("#status-bar", StatusBar)
+        status.update_step(0, self._steps_total)
+
+        def _on_approved(approved_plan: AttackPlan | None) -> None:
+            chat = self.query_one("#chat-panel", ChatPanel)
+            if approved_plan is None:
+                self._reply_system(chat, "Plan cancelled.")
+                if self._orchestrator:
+                    self._orchestrator.cancel_pending()
+                return
+            self._reply_system(chat, "Plan approved. Starting execution…")
+            # Tell the orchestrator which plan to use (in case it was edited)
+            if self._orchestrator is not None:
+                self._orchestrator._active_plan = approved_plan
+                self._orchestrator._loop_plan = approved_plan
+
+            # Defer the worker until after the current refresh cycle so that
+            # do_pop() + screen.remove() fully complete before we mount any
+            # new widgets (StepConfirmWidget / FindingCard). Starting the
+            # worker synchronously here would race with the modal's DOM
+            # cleanup and produce a 'NoneType has no render_strips' crash.
+            def _start_plan() -> None:
+                self.run_worker(
+                    self._execute_approved_plan(approved_plan),
+                    exclusive=False,
+                    name="plan-loop",
+                )
+
+            self.call_after_refresh(_start_plan)
+
+        # Defer push_screen until after the refresh triggered by set_plan() and
+        # update_step() above. This ensures TaskList and StatusBar have settled
+        # in the compositor before the modal screen layers on top.
+        self.call_after_refresh(
+            lambda: self.app.push_screen(PlanApprovalScreen(plan), _on_approved)
+        )
+
+    async def _execute_approved_plan(self, plan: AttackPlan) -> None:
+        """Run the approved plan loop and emit the final response."""
+        if self._orchestrator is None:
+            return
+        self._orchestrator_busy = True
+        chat = self.query_one("#chat-panel", ChatPanel)
+        chat.set_thinking(True)
+        try:
+            response = await self._orchestrator.run_plan_loop(plan)
+        except Exception:
+            logger.exception("[MainScreen] run_plan_loop raised unexpectedly.")
+            self._reply_system(chat, "Plan execution encountered an error. Check logs.")
+            return
+        else:
+            self._on_orchestrator_response(response)
+        finally:
+            self._orchestrator_busy = False
+            chat.set_thinking(False)
+
     # ── Task update callback (from Orchestrator) ───────────────────────────
 
     def _on_task_update(self, task_id: str, status: str, note: str) -> None:
-        """Invoked by the Orchestrator when a task changes state."""
+        """Invoked by the Orchestrator when a step changes state."""
         task_list = self.query_one("#task-list", TaskList)
         try:
-            task_status = TaskStatus(status)
+            step_status = PlanStepStatus(status)
         except ValueError:
-            task_status = TaskStatus.PENDING
+            step_status = PlanStepStatus.PENDING
 
-        if task_list.plan is not None:
-            task_list.update_task_status(
-                task_id, task_status, note if task_status == TaskStatus.FAILED else ""
-            )
-            return
+        task_list.update_task_status(task_id, step_status, note)
 
-        # First task for this session — create the plan on the fly.
-        # The label is passed via note when status is "running".
-        label = note if task_status == TaskStatus.RUNNING and note else task_id
-        plan = AttackPlan(
-            phase=self._project_ctx.current_phase.value.upper() if self._project_ctx else "RECON",
-            tasks=[AttackTask(id=task_id, label=label, tool="", status=task_status)],
-        )
-        task_list.set_plan(plan)
+        # Update status bar step counter
+        if task_list.plan:
+            done = sum(1 for s in task_list.plan.steps if s.status == PlanStepStatus.DONE)
+            total = len(task_list.plan.steps)
+            label = note if step_status == PlanStepStatus.RUNNING else ""
+            status_bar = self.query_one("#status-bar", StatusBar)
+            status_bar.update_step(done, total, label)
 
     def _on_agent_output(self, task_id: str, line: str) -> None:
-        """Invoked by the Orchestrator for each streamed stdout line from an executor."""
+        """Route streaming executor output to the AgentOutputPanel."""
         if not line.strip():
             return
-        chat = self.query_one("#chat-panel", ChatPanel)
-        chat.append_agent_line(f"> {line}")
+        agent_out = self.query_one("#agent-output", AgentOutputPanel)
+        # Start the step if this is the first line
+        if agent_out._current_step_id != task_id:
+            tool = ""
+            if self._orchestrator and self._orchestrator._active_plan:
+                for step in self._orchestrator._active_plan.steps:
+                    if step.id == task_id and step.required_tools:
+                        tool = step.required_tools[0]
+                        break
+            agent_out.start_step(task_id, tool)
+        agent_out.push_line(line)
+
+    def _on_task_complete(self, task_id: str) -> None:
+        """Signal AgentOutputPanel that a step is done."""
+        agent_out = self.query_one("#agent-output", AgentOutputPanel)
+        if agent_out._current_step_id == task_id:
+            agent_out.end_step()
 
     # ── New project ────────────────────────────────────────────────────────
 
@@ -414,10 +701,7 @@ class MainScreen(Screen[None]):
 
         logger.info(
             "Project loaded",
-            extra={
-                "event": "tui.project_loaded",
-                "project_id": project.id,
-            },
+            extra={"event": "tui.project_loaded", "project_id": project.id},
         )
         await self._activate_project(project, session)
 
@@ -439,7 +723,6 @@ class MainScreen(Screen[None]):
         for finding in findings:
             self._project_ctx.add_finding(finding)
 
-        # Shutdown any previous orchestrator before creating a new one
         if self._orchestrator is not None:
             await self._orchestrator.shutdown()
 
@@ -450,17 +733,18 @@ class MainScreen(Screen[None]):
             on_response=self._on_orchestrator_response,
             on_task_update=self._on_task_update,
             on_agent_output=self._on_agent_output,
+            on_plan_ready=self._on_plan_ready,
         )
         await self._orchestrator.start()
 
         self._refresh_context_panel()
+        self._update_findings_count()
 
         status = self.query_one("#status-bar", StatusBar)
         status.update_project(project.name)
         status.update_phase(session.phase.value.upper())
         status.update_mode(project.mode.value)
 
-        # Restore chat history (skip for new sessions)
         try:
             history = await db.get_chat_history(session.id)
         except Exception:
@@ -476,7 +760,6 @@ class MainScreen(Screen[None]):
                 else:
                     chat.append_system(entry.content)
         else:
-            # Fresh session — show welcome, then auto-trigger recon suggestion
             targets_str = ", ".join(project.targets)
             oos_str = ", ".join(project.out_of_scope) if project.out_of_scope else "none"
             chat.append_system(
@@ -491,14 +774,13 @@ class MainScreen(Screen[None]):
             )
 
     async def _trigger_initial_recon(self) -> None:
-        """Ask the Orchestrator to plan and propose the first recon step."""
+        """Invoke PlannerAgent via Orchestrator; result will trigger on_plan_ready → PlanApprovalScreen."""
         if self._orchestrator is None:
             return
-        # Yield to the event loop so the UI renders fully before the LLM call starts.
         await asyncio.sleep(0)
         self._orchestrator_busy = True
         chat = self.query_one("#chat-panel", ChatPanel)
-        chat.append_system("Analyzing project context...")
+        chat.append_system("Generating attack plan…")
         chat.set_thinking(True)
         try:
             response = await self._orchestrator.on_project_activated()
@@ -541,6 +823,15 @@ class MainScreen(Screen[None]):
             findings_low=counts[FindingSeverity.LOW],
         )
         self.query_one("#context-panel", ContextPanel).set_project(summary)
+
+    def _update_findings_count(self) -> None:
+        if self._project_ctx is None:
+            return
+        active = [
+            f for f in self._project_ctx.findings if f.status not in (FindingStatus.DISMISSED,)
+        ]
+        status_bar = self.query_one("#status-bar", StatusBar)
+        status_bar.update_findings_count(len(active))
 
     # ── Persistence helpers ────────────────────────────────────────────────
 

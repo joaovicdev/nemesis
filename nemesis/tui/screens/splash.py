@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import time
 from typing import ClassVar
 
 from rich.text import Text
@@ -12,19 +10,6 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Static
-
-# #region agent log
-_DBG_LOG = "/Users/joaovictor/projects/research/devil/.cursor/debug-a79067.log"
-
-
-def _dbg(location: str, message: str, hypothesis_id: str) -> None:
-    entry = json.dumps({
-        "sessionId": "a79067", "runId": "post-fix", "hypothesisId": hypothesis_id,
-        "location": location, "message": message, "timestamp": int(time.time() * 1000),
-    })
-    with open(_DBG_LOG, "a") as _f:
-        _f.write(entry + "\n")
-# #endregion
 
 NEMESIS_LOGO = """\
 ███╗   ██╗███████╗███╗   ███╗███████╗███████╗██╗███████╗
@@ -140,20 +125,12 @@ class SplashScreen(Screen[None]):
         if self._transitioning:
             return
         self._transitioning = True
-        # #region agent log
-        _dbg("splash.py:_go_to_main", "scheduling _switch_to_main on APP worker (not SplashScreen)", "H1")
-        # #endregion
-        self.app.run_worker(self._switch_to_main(), exclusive=False)
+        self.app.run_worker(self._switch_to_home(), exclusive=False)
 
-    async def _switch_to_main(self) -> None:
-        # #region agent log
-        _dbg("splash.py:_switch_to_main", "worker started - calling switch_screen", "H1")
-        # #endregion
-        from nemesis.tui.screens.main import MainScreen
-        await self.app.switch_screen(MainScreen())
-        # #region agent log
-        _dbg("splash.py:_switch_to_main", "switch_screen completed successfully", "H1")
-        # #endregion
+    async def _switch_to_home(self) -> None:
+        from nemesis.tui.screens.home import HomeScreen
+
+        await self.app.switch_screen(HomeScreen())
 
     def _build_logo_text(self) -> Text:
         """Build a Rich Text logo with cyan gradient effect."""

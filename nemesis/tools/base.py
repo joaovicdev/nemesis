@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
@@ -61,5 +60,14 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
         phase="enumeration",
         tags=["web", "vulnerabilities"],
         install_hint="sudo apt install nikto",
+    ),
+    "amass": ToolDefinition(
+        name="amass",
+        binary="amass",
+        description="Subdomain enumeration via passive DNS and certificate transparency",
+        phase="recon",
+        destructive=False,
+        tags=["recon", "dns", "subdomain"],
+        install_hint="sudo apt install amass",
     ),
 }

@@ -27,48 +27,25 @@ from nemesis.agents.executor import (
     get_executor,
 )
 from nemesis.agents.llm_client import LLMClient, LLMError
+from nemesis.agents.planner import PlannerAgent
+from nemesis.agents.specialized import get_agent
 from nemesis.core.logging_config import set_session_id
 from nemesis.core.project import ProjectContext
 from nemesis.db.database import Database
 from nemesis.db.models import (
+    AttackPlan,
     ChatEntry,
     ControlMode,
     Finding,
+    FindingSeverity,
     FindingStatus,
+    PlanStep,
+    PlanStepStatus,
     SessionPhase,
     TaskRecord,
 )
 
 logger = logging.getLogger(__name__)
-
-_RECON_PLANNING_SYSTEM = (
-    "You are NEMESIS, an AI penetration testing co-pilot. "
-    "You help security professionals plan and execute authorized engagements. "
-    "Always respond with valid JSON only — no markdown fences, no explanation outside the JSON."
-)
-
-_RECON_PLANNING_PROMPT = """\
-New engagement just initialized:
-
-{context_summary}
-
-Choose the single best initial reconnaissance tool for these targets.
-Consider the context (company type, objectives, constraints) to decide between:
-  - nmap   → network/port scan (best for unknown IP ranges or mixed targets)
-  - whois  → domain registration info (best for domain-only targets, OSINT start)
-  - dig    → DNS enumeration (best when DNS recon is the priority)
-  - gobuster → web directory brute-force (best when a web app URL is the target)
-  - nikto  → web vulnerability scan (best for known web servers)
-
-Reply with valid JSON only:
-{{
-  "tool": "nmap",
-  "extra_args": ["-sV", "-sC", "-T4"],
-  "reasoning": "short explanation (1-2 sentences)",
-  "suggested_command": "nmap -sV -sC -T4 10.0.0.1",
-  "user_message": "friendly message shown to the pentester (1-2 sentences)"
-}}
-"""
 
 _CONVERSATION_SYSTEM = (
     "You are NEMESIS, an AI penetration testing co-pilot. "
@@ -76,6 +53,13 @@ _CONVERSATION_SYSTEM = (
     "Be concise, technical, and actionable. "
     "Never suggest actions outside the defined project scope."
 )
+
+_PHASE_AFTER_PLAN: dict[SessionPhase, SessionPhase] = {
+    SessionPhase.RECON: SessionPhase.ENUMERATION,
+    SessionPhase.ENUMERATION: SessionPhase.EXPLOITATION,
+    SessionPhase.EXPLOITATION: SessionPhase.POST_EXPLOITATION,
+    SessionPhase.POST_EXPLOITATION: SessionPhase.REPORTING,
+}
 
 
 @dataclass
@@ -90,7 +74,7 @@ class OrchestratorResponse:
 
 @dataclass
 class _PendingRecon:
-    """Stores a recon plan waiting for step-mode user confirmation."""
+    """Stores a single-tool plan waiting for step-mode user confirmation."""
 
     tool: str
     target: str
@@ -117,6 +101,7 @@ class Orchestrator:
         on_response: Callable[[OrchestratorResponse], None] | None = None,
         on_task_update: Callable[[str, str, str], None] | None = None,
         on_agent_output: Callable[[str, str], None] | None = None,
+        on_plan_ready: Callable[[AttackPlan], None] | None = None,
     ) -> None:
         self._context = context
         self._db = db
@@ -124,9 +109,15 @@ class Orchestrator:
         self._on_response = on_response
         self._on_task_update = on_task_update
         self._on_agent_output = on_agent_output
+        self._on_plan_ready = on_plan_ready
         self._analyst = AnalystAgent(context, llm_client)
+        self._planner = PlannerAgent(context, llm_client)
         self._running_executors: dict[str, asyncio.Task[ExecutorResult]] = {}
         self._pending_recon: _PendingRecon | None = None
+        self._pending_step: PlanStep | None = None
+        self._active_plan: AttackPlan | None = None
+        self._loop_plan: AttackPlan | None = None
+        self._loop_max_parallel: int = 1
 
     async def start(self) -> None:
         """Initialize the Orchestrator for a session."""
@@ -171,72 +162,50 @@ class Orchestrator:
         """
         Called once immediately after a project is loaded or created.
 
-        Asks the LLM to choose the best initial recon tool based on the project
-        context, then either runs it immediately (auto mode) or presents it to
-        the user for confirmation (step mode).
+        Invokes PlannerAgent to build a structured multi-step attack plan,
+        persists it to the database, then either kicks off the first step
+        (AUTO mode) or presents the plan to the user for approval (STEP/MANUAL).
         """
-        context_summary = self._context.build_llm_context_summary()
-        prompt = _RECON_PLANNING_PROMPT.format(context_summary=context_summary)
-
-        try:
-            plan = await self._llm.chat_json(
-                [
-                    {"role": "system", "content": _RECON_PLANNING_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ]
-            )
-
-            tool = str(plan.get("tool", "nmap")).lower()
-            extra_args: list[str] = [str(a) for a in plan.get("extra_args", [])]
-            reasoning = str(plan.get("reasoning", ""))
-            suggested_cmd = str(plan.get("suggested_command", ""))
-            user_message = str(plan.get("user_message", f"I'll start with a {tool} scan."))
-
-        except LLMError as exc:
-            logger.warning(
-                "LLM recon planning failed — falling back to nmap defaults",
-                extra={
-                    "event": "orchestrator.error",
-                    "error_type": type(exc).__name__,
-                    "context": "recon_planning",
-                },
-            )
-            tool, extra_args, reasoning = "nmap", ["-sV", "-sC", "-T4"], ""
-            targets = self._context.project.targets
-            first_target = targets[0] if targets else "unknown"
-            suggested_cmd = f"nmap -sV -sC -T4 {first_target}"
-            user_message = (
-                f"I couldn't reach the AI model, so I'll default to a standard "
-                f"nmap service scan on {first_target}."
-            )
-
         targets = self._context.project.targets
         if not targets:
             return OrchestratorResponse(text="No targets configured. Add a target first.")
-        first_target = targets[0]
 
-        mode = self._context.mode
+        goal = f"Full penetration test of {', '.join(targets)}" + (
+            f" — {self._context.project.context}" if self._context.project.context else ""
+        )
 
-        if mode == ControlMode.AUTO:
-            header = f"{user_message}\n\nRunning: `{suggested_cmd}`"
-            exec_response = await self._execute_tool(tool, first_target, extra_args)
+        plan = await self._planner.generate_plan(goal)
+        await self._db.create_plan(plan)
+        self._active_plan = plan
+
+        plan_lines = [
+            f"**Attack plan generated** — {len(plan.steps)} step(s):",
+            f"_Goal: {plan.goal}_",
+            "",
+        ]
+        for step in plan.steps:
+            tools_str = ", ".join(step.required_tools) if step.required_tools else "—"
+            dep_str = f" (after {', '.join(step.depends_on)})" if step.depends_on else ""
+            plan_lines.append(f"  **{step.id}** · {step.name}{dep_str} · tools: `{tools_str}`")
+            plan_lines.append(f"    _{step.description}_")
+
+        plan_header = "\n".join(plan_lines)
+
+        # If a TUI callback is registered, hand the plan off for approval and
+        # let the TUI drive execution. Otherwise fall through to the loop here.
+        if self._on_plan_ready is not None:
+            self._on_plan_ready(plan)
             return OrchestratorResponse(
-                text=f"{header}\n\n{exec_response.text}",
-                findings=exec_response.findings,
+                text=f"{plan_header}\n\nReview the plan above and approve to start execution.",
             )
 
-        # step / manual mode — present for confirmation
-        self._pending_recon = _PendingRecon(tool=tool, target=first_target, extra_args=extra_args)
-        reasoning_block = f"\n\n_{reasoning}_" if reasoning else ""
-        response_text = (
-            f"{user_message}{reasoning_block}\n\n"
-            f"Suggested command:\n`{suggested_cmd}`\n\n"
-            "**Run this? (y/n)**"
-        )
+        self._emit_plan_to_tui(plan)
+        loop_response = await self.run_plan_loop(plan)
         return OrchestratorResponse(
-            text=response_text,
-            requires_confirmation=True,
-            confirmation_action_id="initial_recon",
+            text=f"{plan_header}\n\n{loop_response.text}",
+            findings=loop_response.findings,
+            requires_confirmation=loop_response.requires_confirmation,
+            confirmation_action_id=loop_response.confirmation_action_id,
         )
 
     # ── Step-mode confirmation ──────────────────────────────────────────────
@@ -248,17 +217,47 @@ class Orchestrator:
         Args:
             action_id: Must match the `confirmation_action_id` from the pending response.
         """
-        if action_id == "initial_recon" and self._pending_recon is not None:
-            plan = self._pending_recon
-            self._pending_recon = None
+        if action_id.startswith("step:"):
             self._context.record_destructive_confirmation(action_id)
-            return await self._execute_tool(plan.tool, plan.target, plan.extra_args)
+
+            if self._pending_step is None:
+                return OrchestratorResponse(text="No pending step to confirm.")
+
+            step = self._pending_step
+            self._pending_step = None
+            step_response = await self._execute_step(step)
+
+            if self._loop_plan is not None:
+                continuation = await self._pick_next_step_confirmation(self._loop_plan)
+                combined_text = step_response.text + "\n\n---\n\n" + continuation.text
+                return OrchestratorResponse(
+                    text=combined_text,
+                    findings=step_response.findings,
+                    requires_confirmation=continuation.requires_confirmation,
+                    confirmation_action_id=continuation.confirmation_action_id,
+                )
+            return step_response
+
+        if action_id == "initial_recon":
+            self._context.record_destructive_confirmation(action_id)
+
+            if self._pending_step is not None:
+                step = self._pending_step
+                self._pending_step = None
+                return await self._execute_step(step)
+
+            if self._pending_recon is not None:
+                pending = self._pending_recon
+                self._pending_recon = None
+                return await self._execute_tool(pending.tool, pending.target, pending.extra_args)
 
         return OrchestratorResponse(text="No pending action to confirm.")
 
     def cancel_pending(self) -> None:
         """Discard the current pending confirmation without running it."""
         self._pending_recon = None
+        self._pending_step = None
+        self._loop_plan = None
 
     # ── Main message entry point ───────────────────────────────────────────
 
@@ -349,19 +348,17 @@ class Orchestrator:
         return OrchestratorResponse(text="\n".join(lines), findings=validated)
 
     def _handle_plan(self) -> OrchestratorResponse:
-        ctx = self._context
-        targets_str = ", ".join(ctx.project.targets)
-        lines = [
-            f"**Attack plan for {ctx.project.name}**",
-            f"Targets: {targets_str}",
-            f"Current phase: {ctx.session.phase.value}",
-            "",
-            "Recommended sequence:",
-            "  1. Recon     — nmap service + version scan",
-            "  2. Enum      — web dir brute-force / DNS enum (if applicable)",
-            "  3. Exploit   — manual or guided based on findings",
-            "  4. Report    — generate findings report",
-        ]
+        plan = self._active_plan
+        if plan is None:
+            return OrchestratorResponse(text="No plan generated yet.")
+        lines = [f"**Attack plan — {plan.goal}**", ""]
+        for step in plan.steps:
+            icon = {"done": "✓", "running": "⚡", "failed": "✗", "pending": "○"}.get(
+                step.status.value, "○"
+            )
+            lines.append(f"  {icon} [{step.id}] {step.name} ({step.agent})")
+            if step.result_summary:
+                lines.append(f"       → {step.result_summary}")
         return OrchestratorResponse(text="\n".join(lines))
 
     # ── Explicit tool execution ("run nmap on ...") ────────────────────────
@@ -388,6 +385,289 @@ class Orchestrator:
             )
 
         return await self._execute_tool(tool, target)
+
+    # ── Specialized-agent step execution ──────────────────────────────────
+
+    async def _execute_step(self, step: PlanStep) -> OrchestratorResponse:
+        """
+        Route a PlanStep to the correct specialized agent and persist results.
+
+        Looks up the agent class via the AGENT_REGISTRY, instantiates it with
+        the current session context, then executes the step. Findings added to
+        the context by the agent are persisted to the database here.
+
+        Falls back to _execute_tool() if the agent name is not registered.
+        """
+        try:
+            agent_cls = get_agent(step.agent)
+        except ValueError:
+            logger.warning(
+                "Unknown specialized agent — falling back to direct tool execution",
+                extra={
+                    "event": "orchestrator.agent_not_found",
+                    "agent_name": step.agent,
+                    "step_id": step.id,
+                },
+            )
+            first_tool = step.required_tools[0] if step.required_tools else "nmap"
+            target = step.args.get("target", self._context.project.targets[0])
+            extra_args: list[str] = [str(a) for a in step.args.get("extra_args", [])]
+            return await self._execute_tool(first_tool, target, extra_args)
+
+        task_record = TaskRecord(
+            project_id=self._context.project.id,
+            session_id=self._context.session.id,
+            label=step.name,
+            tool=step.required_tools[0] if step.required_tools else step.agent,
+            status="running",
+        )
+        await self._db.create_task(task_record)
+        self._notify_task(step.id, "running", step.name)
+
+        # Mark step as running in the active plan
+        step.status = PlanStepStatus.RUNNING
+
+        # Snapshot finding count before execution so we can identify new findings
+        pre_count = len(self._context.findings)
+
+        agent = agent_cls(self._context, self._llm, self._analyst)
+
+        try:
+            agent_response = await agent.execute(step)
+        except Exception as exc:
+            logger.error(
+                "Specialized agent raised unexpected exception",
+                extra={
+                    "event": "orchestrator.agent_error",
+                    "agent": step.agent,
+                    "step_id": step.id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            step.status = PlanStepStatus.FAILED
+            await self._db.update_task_status(task_record.id, "failed", str(exc))
+            self._notify_task(step.id, "failed", str(exc))
+            return OrchestratorResponse(text=f"Step '{step.name}' failed: {exc}")
+
+        # Persist any findings the agent added to context
+        new_findings = self._context.findings[pre_count:]
+        for finding in new_findings:
+            await self._db.create_finding(finding)
+
+        # Update plan step status and summary
+        if agent_response.action == "error":
+            step.status = PlanStepStatus.FAILED
+            task_status = "failed"
+        elif agent_response.action == "skipped":
+            step.status = PlanStepStatus.SKIPPED
+            task_status = "done"
+        else:
+            step.status = PlanStepStatus.DONE
+            task_status = "done"
+
+        step.result_summary = agent_response.result[:200]
+        step.findings_count = len(new_findings)
+
+        await self._db.update_task_status(task_record.id, task_status)
+        self._notify_task(step.id, task_status, agent_response.result)
+
+        # Persist step status and summary to DB if this step belongs to an active plan
+        if self._active_plan is not None:
+            await self._db.update_plan_step(
+                plan_id=self._active_plan.id,
+                step_id=step.id,
+                status=step.status,
+                result_summary=step.result_summary,
+                findings_count=step.findings_count,
+            )
+
+        lines = [f"**{step.name}** completed."]
+        if agent_response.thought:
+            lines.append(f"_{agent_response.thought}_")
+        lines.append(agent_response.result)
+        if new_findings:
+            lines.append(f"\n{len(new_findings)} finding(s) extracted:")
+            for f in new_findings:
+                lines.append(
+                    f"  [{f.severity.value.upper()}] {f.title} — {f.target}:{f.port or '?'}"
+                )
+        if agent_response.next_step:
+            lines.append(f"\nSuggested next: _{agent_response.next_step}_")
+
+        return OrchestratorResponse(
+            text="\n".join(lines),
+            findings=new_findings if new_findings else None,
+        )
+
+    # ── Execution loop ─────────────────────────────────────────────────────
+
+    def _next_ready_steps(self, plan: AttackPlan, max_parallel: int) -> list[PlanStep]:
+        """
+        Return up to *max_parallel* steps whose dependencies are all DONE.
+
+        A step is eligible when:
+          - status == PENDING
+          - every step id in step.depends_on has status == DONE
+        """
+        done_ids = {s.id for s in plan.steps if s.status == PlanStepStatus.DONE}
+        ready = [
+            s
+            for s in plan.steps
+            if s.status == PlanStepStatus.PENDING and all(dep in done_ids for dep in s.depends_on)
+        ]
+        return ready[:max_parallel]
+
+    async def run_plan_loop(
+        self,
+        plan: AttackPlan,
+        *,
+        max_parallel: int = 1,
+    ) -> OrchestratorResponse:
+        """
+        Drive the full AttackPlan to completion.
+
+        In AUTO mode: runs all ready steps in a tight loop until the plan is
+        done or blocked, emitting intermediate step results via _on_response.
+        In STEP/MANUAL mode: pauses before each step and waits for user
+        confirmation via the existing confirmation gate.
+        """
+        self._loop_plan = plan
+        self._loop_max_parallel = max_parallel
+
+        if self._context.mode == ControlMode.AUTO:
+            return await self._run_loop_auto(plan, max_parallel)
+        return await self._pick_next_step_confirmation(plan)
+
+    async def _run_loop_auto(
+        self,
+        plan: AttackPlan,
+        max_parallel: int,
+    ) -> OrchestratorResponse:
+        """Full AUTO-mode loop — runs every ready step until done or blocked."""
+        while True:
+            ready = self._next_ready_steps(plan, max_parallel)
+
+            if not ready:
+                pending = [s for s in plan.steps if s.status == PlanStepStatus.PENDING]
+                if not pending:
+                    return await self._finish_plan(plan)
+                return self._make_blocked_response(plan)
+
+            if max_parallel > 1 and len(ready) > 1:
+                tasks = [asyncio.create_task(self._execute_step(s)) for s in ready]
+                results: list[OrchestratorResponse | BaseException] = await asyncio.gather(
+                    *tasks, return_exceptions=True
+                )
+                for step, result in zip(ready, results, strict=True):
+                    if isinstance(result, BaseException):
+                        step.status = PlanStepStatus.FAILED
+                        err_resp = OrchestratorResponse(
+                            text=f"Step '{step.name}' failed unexpectedly: {result}"
+                        )
+                        if self._on_response:
+                            self._on_response(err_resp)
+                    elif isinstance(result, OrchestratorResponse) and self._on_response:
+                        self._on_response(result)
+            else:
+                for step in ready:
+                    response = await self._execute_step(step)
+                    if self._on_response:
+                        self._on_response(response)
+
+    async def _pick_next_step_confirmation(self, plan: AttackPlan) -> OrchestratorResponse:
+        """
+        STEP/MANUAL mode helper: select the next ready step, store it as
+        _pending_step, and return a confirmation-gate response.
+
+        Returns a plan-complete or blocked message if no step is ready.
+        """
+        ready = self._next_ready_steps(plan, 1)
+
+        if not ready:
+            pending = [s for s in plan.steps if s.status == PlanStepStatus.PENDING]
+            if not pending:
+                return await self._finish_plan(plan)
+            return self._make_blocked_response(plan)
+
+        step = ready[0]
+        self._pending_step = step
+
+        first_tool = step.required_tools[0] if step.required_tools else step.agent
+        target = step.args.get(
+            "target",
+            self._context.project.targets[0] if self._context.project.targets else "?",
+        )
+        return OrchestratorResponse(
+            text=(
+                f"Next step: **{step.name}**\n"
+                f"Run `{first_tool}` on `{target}`?\n\n"
+                "**Continue? (y/n)**"
+            ),
+            requires_confirmation=True,
+            confirmation_action_id=f"step:{step.id}",
+        )
+
+    async def _finish_plan(self, plan: AttackPlan) -> OrchestratorResponse:
+        """Emit the plan-complete summary and advance the session phase."""
+        total = len(plan.steps)
+        done_count = sum(1 for s in plan.steps if s.status == PlanStepStatus.DONE)
+        failed_count = sum(1 for s in plan.steps if s.status == PlanStepStatus.FAILED)
+
+        findings = self._context.findings
+        critical = sum(1 for f in findings if f.severity == FindingSeverity.CRITICAL)
+        high = sum(1 for f in findings if f.severity == FindingSeverity.HIGH)
+        medium = sum(1 for f in findings if f.severity == FindingSeverity.MEDIUM)
+
+        current_phase = self._context.session.phase
+        next_phase = _PHASE_AFTER_PLAN.get(current_phase)
+        phase_line = ""
+        if next_phase:
+            self._context.advance_phase(next_phase)
+            await self._db.update_session_phase(self._context.session.id, next_phase)
+            phase_line = (
+                f"\n  Phase advanced: {current_phase.value.upper()} → {next_phase.value.upper()}"
+            )
+
+        logger.info(
+            "Attack plan complete",
+            extra={
+                "event": "orchestrator.plan_complete",
+                "steps_total": total,
+                "steps_done": done_count,
+                "steps_failed": failed_count,
+                "findings_total": len(findings),
+            },
+        )
+
+        lines = [
+            "**Plan complete.**",
+            f"  Steps run:    {total}",
+            f"  Steps done:   {done_count}",
+            f"  Steps failed: {failed_count}",
+            f"  Findings:     {len(findings)} ({critical} critical, {high} high, {medium} medium)",
+        ]
+        if phase_line:
+            lines.append(phase_line)
+        return OrchestratorResponse(text="\n".join(lines))
+
+    def _make_blocked_response(self, plan: AttackPlan) -> OrchestratorResponse:
+        """Return a warning when pending steps cannot advance (all deps failed/blocked)."""
+        pending_names = [s.name for s in plan.steps if s.status == PlanStepStatus.PENDING]
+        logger.warning(
+            "Plan execution blocked — pending steps with unresolvable dependencies",
+            extra={
+                "event": "orchestrator.plan_blocked",
+                "blocked_steps": pending_names,
+            },
+        )
+        return OrchestratorResponse(
+            text=(
+                "**Plan blocked.** "
+                f"The following steps have unresolvable dependencies: "
+                f"{', '.join(pending_names)}. "
+                "Check that earlier steps completed successfully."
+            )
+        )
 
     # ── Core execution ─────────────────────────────────────────────────────
 
@@ -540,6 +820,11 @@ class Orchestrator:
             )
 
     # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _emit_plan_to_tui(self, plan: AttackPlan) -> None:
+        """Push each plan step to the TUI task list as a pending task."""
+        for step in plan.steps:
+            self._notify_task(step.id, "pending", step.name)
 
     def _notify_task(self, task_id: str, status: str, note: str) -> None:
         if self._on_task_update:
