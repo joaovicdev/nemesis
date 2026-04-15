@@ -85,6 +85,14 @@ _MEDIUM_RISK_SERVICES = {"ssh", "smtp", "pop3", "imap", "snmp", "nfs", "smb", "l
 # amass output format: one subdomain per line, e.g. "sub.example.com"
 _AMASS_SUBDOMAIN_RE = re.compile(r"^([a-zA-Z0-9._-]+\.[a-zA-Z]{2,})$", re.MULTILINE)
 
+# Nuclei output format: [severity] [template-id] [matched-url]
+_NUCLEI_LINE_RE = re.compile(
+    r"\[(?P<severity>critical|high|medium|low|info)\]\s+"
+    r"\[(?P<template>[^\]]+)\]\s+"
+    r"(?P<url>\S+)",
+    re.IGNORECASE,
+)
+
 
 class AnalystAgent:
     """
@@ -287,11 +295,14 @@ def _regex_fallback(result: ExecutorResult) -> list[dict[str, object]]:
     Currently handles:
     - nmap: open port lines → one INFO/MEDIUM/HIGH finding per port
     - amass: subdomain lines → one INFO finding per discovered subdomain
+    - nuclei: silent CLI lines → one finding per template match
     """
     if result.tool == "nmap":
         return _parse_nmap_ports(result.stdout)
     if result.tool == "amass":
         return _parse_amass_output(result.stdout)
+    if result.tool == "nuclei":
+        return _parse_nuclei_output(result.stdout)
     return []
 
 
@@ -344,6 +355,36 @@ def _parse_amass_output(stdout: str) -> list[dict[str, object]]:
         }
         for sub in subdomains
     ]
+
+
+def _parse_nuclei_output(stdout: str) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    confidence_map = {
+        "critical": 0.9,
+        "high": 0.8,
+        "medium": 0.7,
+        "low": 0.55,
+        "info": 0.5,
+    }
+    for match in _NUCLEI_LINE_RE.finditer(stdout):
+        severity = match.group("severity").lower()
+        template = match.group("template")
+        url = match.group("url")
+        confidence = confidence_map.get(severity, 0.6)
+        cve_ids: list[str] = [template] if template.upper().startswith("CVE-") else []
+        candidates.append(
+            {
+                "title": f"Nuclei: {template}",
+                "description": f"nuclei template '{template}' matched on {url}.",
+                "severity": severity,
+                "confidence": confidence,
+                "port": "",
+                "service": "http",
+                "cve_ids": cve_ids,
+                "remediation": f"Review and remediate '{template}' finding on {url}.",
+            }
+        )
+    return candidates
 
 
 def _severity_for_service(service: str) -> tuple[str, float]:

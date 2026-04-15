@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, ClassVar
 from textual.app import App
 from textual.binding import Binding
 
-from nemesis.agents.llm_client import LLMClient
+from nemesis.agents.llm_client import LLMClient, load_llm_config_from_env
 from nemesis.db.database import Database
 from nemesis.tui.screens.splash import SplashScreen
 
@@ -40,7 +40,7 @@ class NemesisApp(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.db: Database = Database()
-        self.llm_client: LLMClient = LLMClient()
+        self.llm_client: LLMClient = LLMClient(load_llm_config_from_env())
 
     async def on_mount(self) -> None:
         logger.info(

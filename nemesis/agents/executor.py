@@ -302,6 +302,30 @@ class AmassExecutor(BaseExecutor):
         return base + self.extra_args
 
 
+class NucleiExecutor(BaseExecutor):
+    """Runs nuclei template-based vulnerability scanner."""
+
+    TOOL_NAME = "nuclei"
+    TOOL_BINARY = "nuclei"
+    DESTRUCTIVE = False
+
+    # Severity levels to include (can be overridden via extra_args)
+    DEFAULT_SEVERITY = "medium,high,critical"
+
+    def _build_command(self, binary: str) -> list[str]:
+        # -u target, -severity filter, -silent (machine-readable), -no-color output
+        cmd = [
+            binary,
+            "-u",
+            self.target,
+            "-severity",
+            self.DEFAULT_SEVERITY,
+            "-silent",
+            "-no-color",
+        ]
+        return cmd + self.extra_args
+
+
 # Registry: maps tool name → executor class
 EXECUTOR_REGISTRY: dict[str, type[BaseExecutor]] = {
     "nmap": NmapExecutor,
@@ -310,6 +334,7 @@ EXECUTOR_REGISTRY: dict[str, type[BaseExecutor]] = {
     "nikto": NiktoExecutor,
     "dig": DigExecutor,
     "amass": AmassExecutor,
+    "nuclei": NucleiExecutor,
 }
 
 

@@ -20,8 +20,8 @@ Rules:
 - Output valid JSON only — no markdown fences, no extra text outside the JSON object.
 - Each step must have a unique id in the format "step-NNN" (zero-padded, starting at 001).
 - depends_on must only reference ids of earlier steps in the same plan.
-- required_tools must be a subset of: ["nmap", "whois", "dig", "gobuster", "nikto"].
-- agent must be one of: "recon_agent", "scanning_agent", "enumeration_agent", "vulnerability_agent".
+- required_tools must be a subset of: ["nmap", "whois", "dig", "gobuster", "nikto", "nuclei"].
+- agent must be one of: "recon_agent", "scanning_agent", "enumeration_agent", "vulnerability_agent", "nuclei_agent".
 - Keep the plan focused: 3–7 steps covering the full engagement lifecycle.
 
 Output schema (strict):
@@ -156,9 +156,7 @@ class PlannerAgent:
                 continue
             seen_ids.add(step_id)
             try:
-                steps.append(
-                    PlanStep.model_validate({**item, "status": PlanStepStatus.PENDING})
-                )
+                steps.append(PlanStep.model_validate({**item, "status": PlanStepStatus.PENDING}))
             except ValidationError:
                 logger.warning("Skipping invalid plan step: %s", item)
 

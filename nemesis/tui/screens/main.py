@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
+from nemesis.agents.llm_client import LLMClient
 from nemesis.agents.orchestrator import Orchestrator, OrchestratorResponse
 from nemesis.core.project import ProjectContext
 from nemesis.db.models import (
@@ -160,7 +161,8 @@ class MainScreen(Screen[None]):
             extra={"event": "tui.screen_mounted", "screen": "MainScreen"},
         )
         status = self.query_one("#status-bar", StatusBar)
-        status.update_model("ollama / llama3.1:8b")
+        llm_client: LLMClient = self.app.llm_client  # type: ignore[attr-defined]
+        status.update_model(llm_client.model_name)
         status.update_project("no project")
         status.update_phase("—")
         status.update_mode("step")

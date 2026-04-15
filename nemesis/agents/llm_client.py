@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import litellm
 from pydantic import ValidationError
@@ -34,6 +36,101 @@ class LLMConfig:
     extra_headers: dict[str, str] = field(default_factory=dict)
 
 
+_DOTENV_LOADED = False
+
+
+def _optional_dotenv_paths() -> tuple[Path, ...]:
+    """
+    Candidate `.env` locations (optional; files may be absent).
+
+    Order: current working directory first, then repository root when running from a
+    source checkout (directory containing `pyproject.toml` next to the `nemesis` package).
+    Values already set in the process environment are never overwritten (see
+    `_ensure_optional_dotenv_loaded`).
+    """
+    cwd = Path.cwd()
+    agents_dir = Path(__file__).resolve().parent
+    nemesis_pkg = agents_dir.parent
+    repo_root = nemesis_pkg.parent
+    paths: list[Path] = [cwd / ".env"]
+    if (repo_root / "pyproject.toml").is_file():
+        paths.append(repo_root / ".env")
+    # Preserve order, drop duplicates
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for p in paths:
+        rp = p.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            unique.append(p)
+    return tuple(unique)
+
+
+def _ensure_optional_dotenv_loaded() -> None:
+    """Load optional project `.env` files into the environment (does not override existing)."""
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    for path in _optional_dotenv_paths():
+        if path.is_file():
+            load_dotenv(path, override=False)
+
+
+def load_llm_config_from_env() -> LLMConfig:
+    """
+    Build an LLMConfig from environment variables, falling back to defaults.
+
+    If a `.env` file exists in the current working directory or (for a dev checkout)
+    next to `pyproject.toml`, it is loaded first. Variables already set in the process
+    environment take precedence over `.env`.
+
+    Supported variables:
+        NEMESIS_MODEL       — LiteLLM model string (e.g. "ollama/llama3.1:8b")
+        NEMESIS_BASE_URL    — API base URL (for local or self-hosted providers)
+        NEMESIS_API_KEY     — API key passed as Bearer token in extra_headers
+        NEMESIS_TEMPERATURE — float 0.0–1.0
+        NEMESIS_MAX_TOKENS  — int
+        NEMESIS_TIMEOUT     — int seconds
+    """
+    _ensure_optional_dotenv_loaded()
+    model = os.environ.get("NEMESIS_MODEL", _DEFAULT_MODEL).strip()
+    base_url = os.environ.get("NEMESIS_BASE_URL", _DEFAULT_BASE_URL).strip()
+    api_key = os.environ.get("NEMESIS_API_KEY", "").strip()
+
+    try:
+        temperature = float(os.environ.get("NEMESIS_TEMPERATURE", "0.3"))
+    except ValueError:
+        temperature = 0.3
+
+    try:
+        max_tokens = int(os.environ.get("NEMESIS_MAX_TOKENS", "2048"))
+    except ValueError:
+        max_tokens = 2048
+
+    try:
+        timeout = int(os.environ.get("NEMESIS_TIMEOUT", "60"))
+    except ValueError:
+        timeout = 60
+
+    extra_headers: dict[str, str] = {}
+    if api_key:
+        extra_headers["Authorization"] = f"Bearer {api_key}"
+
+    return LLMConfig(
+        model=model,
+        base_url=base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        extra_headers=extra_headers,
+    )
+
+
 class LLMError(Exception):
     """Raised when an LLM call fails unrecoverably."""
 
@@ -48,6 +145,11 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig | None = None) -> None:
         self._config = config or LLMConfig()
+
+    @property
+    def model_name(self) -> str:
+        """Human-readable model identifier for display in UI."""
+        return self._config.model
 
     async def chat(
         self,

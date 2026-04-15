@@ -1,22 +1,22 @@
-![NEMESIS](./banner.png)
+NEMESIS
 
-<div align="center">
 
-[![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python)](https://www.python.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![LiteLLM](https://img.shields.io/badge/AI-LiteLLM-cyan?style=flat-square)](https://github.com/BerriAI/litellm)
-[![Ollama](https://img.shields.io/badge/default%20backend-Ollama-blue?style=flat-square)](https://ollama.com)
-[![Status](https://img.shields.io/badge/status-alpha-red?style=flat-square)]()
+
+[Python](https://www.python.org)
+[License: MIT](LICENSE)
+[LiteLLM](https://github.com/BerriAI/litellm)
+[Ollama](https://ollama.com)
+[Status]()
 
 **AI-assisted penetration testing, not an autonomous hacker, your expert analyst, always at your side.**
 
-</div>
+
 
 ---
 
 ## What is NEMESIS?
 
-NEMESIS is a terminal-based AI co-pilot for penetration testers. It is powered by **LiteLLM** — an abstraction layer that supports any AI provider. By default it runs a local model via Ollama: no cloud, no API keys, no data leaving your machine. Future versions will optionally support OpenAI, Anthropic, Groq, and any OpenAI-compatible endpoint.
+NEMESIS is a terminal-based AI co-pilot for penetration testers. It is powered by **LiteLLM** — an abstraction layer that supports any AI provider. By default it runs a local model via Ollama: no cloud, no API keys, no data leaving your machine. You can also opt into remote providers (OpenAI, Anthropic, etc.) or any OpenAI-compatible endpoint via environment variables.
 
 Unlike fully autonomous tools, NEMESIS follows the **assisted pentest** philosophy: **you drive, the AI assists**. You make the strategic decisions; NEMESIS handles memory, analysis, false-positive filtering, and finding correlation across your entire engagement.
 
@@ -41,6 +41,7 @@ NEMESIS: [runs verification] "Confirmed. LFI works. Document and move on, or exp
 - **3 control modes** — Auto (AI drives), Step (approve each move), Manual (you command, AI analyzes).
 - **Destructive action gates** — exploits, brute force, and any potentially disruptive action require your explicit confirmation, which is logged for audit trails.
 - **100% local by default** — powered by LiteLLM with Ollama as the default backend. Your targets, findings, and client data never leave your machine unless you explicitly configure an external provider.
+- **Configurable LLM backend** — set the model, base URL, and optional credentials via environment variables or a local `.env` file.
 - **Cyberpunk TUI** — full terminal UI with panels, real-time streaming, and a chat interface that feels like a colleague, not a form.
 
 ---
@@ -86,8 +87,8 @@ NEMESIS: [runs verification] "Confirmed. LFI works. Document and move on, or exp
 - Linux (Kali, Parrot, Ubuntu) or macOS
 
 NEMESIS uses **LiteLLM** as its AI layer, which means the model backend is configurable.
-Ollama is the default for local, offline, air-gapped use. See [v0.8 in the roadmap](ROADMAP.md)
-for future support of OpenAI, Anthropic, Groq, and custom endpoints.
+Ollama is the default for local, offline, air-gapped use. You can also opt into remote providers
+or OpenAI-compatible endpoints by setting environment variables (see “LLM configuration” below).
 
 **Recommended Ollama model:**
 
@@ -105,11 +106,13 @@ ollama pull llama3.2:3b
 
 ```bash
 # Debian/Ubuntu/Kali/Parrot
-sudo apt install nmap whois dnsutils curl nikto gobuster
+sudo apt install nmap whois dnsutils nikto gobuster amass nuclei
 
 # macOS (Homebrew)
-brew install nmap whois gobuster
+brew install nmap whois gobuster amass nuclei
 ```
+
+`curl` is optional and useful for manual verification during engagements (and for future tool integrations).
 
 ---
 
@@ -128,6 +131,71 @@ ollama serve &
 ollama pull llama3.1:8b
 
 # 4. Launch NEMESIS
+uv run nemesis
+```
+
+---
+
+## LLM configuration
+
+NEMESIS loads LLM settings from environment variables. You can set them directly in your shell
+or put them in an optional `.env` file.
+
+### Environment variables
+
+
+| Variable              | Default                  | Example                                                                       |
+| --------------------- | ------------------------ | ----------------------------------------------------------------------------- |
+| `NEMESIS_MODEL`       | `ollama/llama3.1:8b`     | `openai/gpt-4o`, `anthropic/claude-3-5-sonnet-20241022`, `ollama/qwen2.5:72b` |
+| `NEMESIS_BASE_URL`    | `http://localhost:11434` | `https://api.openai.com/v1`, `http://localhost:1234/v1`                       |
+| `NEMESIS_API_KEY`     | `""`                     | `sk-...`                                                                      |
+| `NEMESIS_TEMPERATURE` | `0.3`                    | `0.1`                                                                         |
+| `NEMESIS_MAX_TOKENS`  | `2048`                   | `4096`                                                                        |
+| `NEMESIS_TIMEOUT`     | `60`                     | `120`                                                                         |
+
+
+LiteLLM also supports provider-specific environment variables such as `OPENAI_API_KEY` and
+`ANTHROPIC_API_KEY`.
+
+### Optional `.env` file
+
+If a `.env` file exists, NEMESIS will load it from:
+
+- the current working directory: `./.env`
+- or the repository root (when running from a source checkout)
+
+Values already present in the process environment are **not overwritten** by `.env`. This means
+operators can always override any `.env` value via shell exports.
+
+### Examples
+
+**Ollama local (default)**
+
+```bash
+uv run nemesis
+```
+
+**Ollama local with a different model**
+
+```bash
+NEMESIS_MODEL=ollama/qwen2.5:72b uv run nemesis
+```
+
+**OpenAI**
+
+```bash
+NEMESIS_MODEL=openai/gpt-4o \
+NEMESIS_BASE_URL=https://api.openai.com/v1 \
+OPENAI_API_KEY=sk-... \
+uv run nemesis
+```
+
+**OpenAI-compatible endpoint (LM Studio / vLLM / etc.)**
+
+```bash
+NEMESIS_MODEL=openai/mistral-nemo \
+NEMESIS_BASE_URL=http://localhost:1234/v1 \
+NEMESIS_API_KEY=sk-... \
 uv run nemesis
 ```
 
@@ -218,9 +286,10 @@ nemesis/
 │   │   ├── screens/         # splash, main, new_project
 │   │   └── widgets/         # chat, context, task_list, status_bar
 │   ├── core/                # domain models and config
-│   ├── agents/              # orchestrator, analyst, executor
+│   ├── agents/              # orchestrator, analyst, executor, specialized agents
+│   │   └── specialized/     # recon, scanning, enumeration, vulnerability, nuclei
 │   ├── db/                  # SQLite async persistence
-│   └── tools/               # tool wrappers (nmap, gobuster, etc.)
+│   └── tools/               # thin wrappers / future tool layer
 ├── tests/
 ├── pyproject.toml
 └── README.md
@@ -232,12 +301,12 @@ nemesis/
 
 - Foundation: TUI, project model, SQLite persistence
 - Orchestrator agent with LiteLLM/Ollama integration
-- Executor agents: nmap, whois, dig, curl, gobuster, nikto
+- Executor agents: nmap, whois, dig, gobuster, nikto, amass, nuclei
 - Analyst agent: false-positive filtering, confidence scoring
 - Finding correlation and attack path construction
 - Report generation (PDF + HTML)
-- Additional tools: sqlmap, nuclei, theHarvester, ffuf
-- External LLM providers (OpenAI, Anthropic) as opt-in
+- Additional tools: sqlmap, searchsploit, theHarvester, ffuf
+- External LLM providers (OpenAI, Anthropic) as opt-in (already supported via LiteLLM configuration)
 - Plugin system for custom tools
 
 ---
