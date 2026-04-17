@@ -6,6 +6,7 @@ from nemesis.agents.specialized.base import BaseSpecializedAgent
 from nemesis.core.config import config
 from nemesis.core.wordlists import KALI_DEFAULT_SENTINEL, resolve_ffuf_wordlist
 from nemesis.db.models import AgentResponse, PlanStep
+from nemesis.tools.agent_allowlist import pick_fallback_tool
 
 _FFUF_SYSTEM = """\
 You are a web enumeration specialist agent within NEMESIS, an authorized \
@@ -17,9 +18,6 @@ You MUST only use tools from the allowed list provided to you.
 Always respond with valid JSON only — no markdown, no explanation outside the JSON.\
 """
 
-ALLOWED_TOOLS: list[str] = ["ffuf"]
-
-
 class FfufAgent(BaseSpecializedAgent):
     """
     Web fuzzing specialist agent.
@@ -30,7 +28,6 @@ class FfufAgent(BaseSpecializedAgent):
 
     AGENT_NAME = "ffuf_agent"
     SYSTEM_PROMPT = _FFUF_SYSTEM
-    ALLOWED_TOOLS = ALLOWED_TOOLS
 
     def _merge_executor_cli_args(self, step: PlanStep, tool: str, llm_cli: list[str]) -> list[str]:
         if tool != "ffuf":
@@ -53,10 +50,20 @@ class FfufAgent(BaseSpecializedAgent):
         return ["-w", wordlist, *merged]
 
     def _fallback_action(self, step: PlanStep, target: str) -> AgentResponse:
+        tool = pick_fallback_tool(self.AGENT_NAME, "ffuf")
+        if not tool:
+            return AgentResponse(
+                thought="ffuf not in registry.",
+                action="error",
+                tool=None,
+                args={},
+                result="ffuf is not installed or not in the tool manifest.",
+                next_step=None,
+            )
         return AgentResponse(
-            thought=f"LLM unavailable — running default ffuf directory scan on {target}",
+            thought=f"LLM unavailable — running default {tool} on {target}",
             action="run_tool",
-            tool="ffuf",
+            tool=tool,
             args={},
             result="",
             next_step=None,

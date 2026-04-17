@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nemesis.agents.specialized.base import BaseSpecializedAgent
 from nemesis.db.models import AgentResponse, PlanStep
+from nemesis.tools.agent_allowlist import pick_fallback_tool
 
 _NUCLEI_SYSTEM = """\
 You are a vulnerability assessment specialist agent within NEMESIS, an authorized \
@@ -15,9 +16,6 @@ You MUST only use tools from the allowed list provided to you.
 Always respond with valid JSON only — no markdown, no explanation outside the JSON.\
 """
 
-ALLOWED_TOOLS: list[str] = ["nuclei"]
-
-
 class NucleiAgent(BaseSpecializedAgent):
     """
     Template-based vulnerability scanner agent.
@@ -28,13 +26,22 @@ class NucleiAgent(BaseSpecializedAgent):
 
     AGENT_NAME = "nuclei_agent"
     SYSTEM_PROMPT = _NUCLEI_SYSTEM
-    ALLOWED_TOOLS = ALLOWED_TOOLS
 
     def _fallback_action(self, step: PlanStep, target: str) -> AgentResponse:
+        tool = pick_fallback_tool(self.AGENT_NAME, "nuclei")
+        if not tool:
+            return AgentResponse(
+                thought="nuclei not in registry.",
+                action="error",
+                tool=None,
+                args={},
+                result="nuclei is not installed or not in the tool manifest.",
+                next_step=None,
+            )
         return AgentResponse(
-            thought=f"LLM unavailable — running default nuclei scan on {target}",
+            thought=f"LLM unavailable — running default {tool} on {target}",
             action="run_tool",
-            tool="nuclei",
+            tool=tool,
             args={},
             result="",
             next_step=None,

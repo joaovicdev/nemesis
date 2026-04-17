@@ -22,6 +22,12 @@ FFUF_WORDLIST_CANDIDATES_KALI: list[str] = [
     "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
 ]
 
+# gobuster dir — same Kali-first preference order as legacy executor
+GOBUSTER_WORDLIST_CANDIDATES_KALI: list[str] = [
+    "/usr/share/wordlists/dirb/common.txt",
+    "/usr/share/seclists/Discovery/Web-Content/common.txt",
+]
+
 
 def first_existing(candidates: list[str]) -> str | None:
     """Return the first candidate path that exists on disk."""
@@ -63,6 +69,22 @@ def resolve_ffuf_wordlist(preference: str | None, config_default: str | None) ->
     raise FileNotFoundError(
         "No ffuf wordlist found. "
         "Install seclists/dirb wordlists or configure NEMESIS_DEFAULT_FFUF_WORDLIST."
+    )
+
+
+def resolve_gobuster_dir_wordlist() -> str:
+    """
+    Return the first existing path suitable for `gobuster dir -w`.
+
+    Raises:
+        FileNotFoundError: If no candidate exists.
+    """
+    resolved = first_existing(GOBUSTER_WORDLIST_CANDIDATES_KALI)
+    if resolved:
+        return resolved
+    raise FileNotFoundError(
+        "No gobuster wordlist found. Install dirb/seclists wordlists or extend "
+        "GOBUSTER_WORDLIST_CANDIDATES_KALI."
     )
 
 

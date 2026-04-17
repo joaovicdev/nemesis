@@ -28,6 +28,8 @@ from nemesis.agents.executor import (
 from nemesis.agents.llm_client import LLMClient, LLMError
 from nemesis.core.project import ProjectContext
 from nemesis.db.models import AgentResponse, PlanStep
+from nemesis.tools.agent_allowlist import resolve_allowed_tool_names
+from nemesis.tools.base import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,9 @@ class BaseSpecializedAgent(ABC):
     Subclasses MUST define:
       - AGENT_NAME   — registry key used by the Orchestrator
       - SYSTEM_PROMPT — LLM persona for this agent
-      - ALLOWED_TOOLS — fallback tool whitelist (overridden per-step by step.required_tools)
+
+    Allowed tools: step.required_tools (validated against TOOL_REGISTRY), or else
+    resolve_allowed_tool_names(AGENT_NAME) from the manifest (phase / single-tool).
 
     Subclasses SHOULD override:
       - _fallback_action() — default action when LLM is unreachable
@@ -68,7 +72,6 @@ class BaseSpecializedAgent(ABC):
 
     AGENT_NAME: str = ""
     SYSTEM_PROMPT: str = ""
-    ALLOWED_TOOLS: list[str] = []
 
     def __init__(
         self,
@@ -81,6 +84,34 @@ class BaseSpecializedAgent(ABC):
         self._analyst = analyst
         self._log = logging.getLogger(f"{__name__}.{self.AGENT_NAME or type(self).__name__}")
 
+    def _effective_allowed_tools(self, step: PlanStep) -> list[str]:
+        """
+        Tools the LLM may choose: plan step list (validated) or manifest-derived fallback.
+
+        When required_tools is set, order is preserved; no prompt cap.
+        When empty, uses resolve_allowed_tool_names (sorted, capped).
+        """
+        if step.required_tools:
+            raw = [t.strip().lower() for t in step.required_tools if str(t).strip()]
+            seen: set[str] = set()
+            validated: list[str] = []
+            for t in raw:
+                if t not in TOOL_REGISTRY:
+                    self._log.warning(
+                        "Plan step lists tool not in registry — skipping",
+                        extra={
+                            "event": f"{self.AGENT_NAME}.tool_not_in_registry",
+                            "tool": t,
+                            "step_id": step.id,
+                        },
+                    )
+                    continue
+                if t not in seen:
+                    seen.add(t)
+                    validated.append(t)
+            return validated
+        return resolve_allowed_tool_names(self.AGENT_NAME)
+
     # ── Public API ─────────────────────────────────────────────────────────
 
     async def execute(self, step: PlanStep) -> AgentResponse:
@@ -92,6 +123,17 @@ class BaseSpecializedAgent(ABC):
         Orchestrator can read and persist them after this call returns.
         """
         target = self._resolve_target(step)
+
+        allowed = self._effective_allowed_tools(step)
+        if not allowed:
+            return AgentResponse(
+                thought="No tools available for this step (empty registry or invalid required_tools).",
+                action="error",
+                tool=None,
+                args={},
+                result="No allowed tools resolved for this agent step.",
+                next_step=None,
+            )
 
         # 1. Ask LLM for the action decision
         try:
@@ -107,17 +149,17 @@ class BaseSpecializedAgent(ABC):
             )
             action = self._fallback_action(step, target)
 
-        allowed = step.required_tools or self.ALLOWED_TOOLS
-        default_tool = allowed[0] if allowed else ""
-
-        tool: str = action.tool or default_tool
+        default_tool = allowed[0]
+        tool_raw: str = action.tool or default_tool
+        tool = tool_raw.strip().lower()
         thought: str = action.thought or f"Executing step {step.id}"
         args: list[str] = list(str(v) for v in action.args.values()) if action.args else []
         args = self._merge_executor_cli_args(step, tool, args)
         next_step: str | None = action.next_step
 
-        # Guard: only allow tools within the step's declared scope
-        if tool not in allowed:
+        # Guard: only allow tools within the effective whitelist
+        allowed_set = set(allowed)
+        if tool not in allowed_set:
             self._log.warning(
                 "LLM selected tool outside allowed list — rejecting",
                 extra={
@@ -216,7 +258,7 @@ class BaseSpecializedAgent(ABC):
         enforces the constraint before execution.
         """
         target = self._resolve_target(step)
-        allowed = step.required_tools or self.ALLOWED_TOOLS
+        allowed = self._effective_allowed_tools(step)
         default_tool = allowed[0] if allowed else ""
 
         prompt = _ACTION_PROMPT.format(
@@ -236,7 +278,9 @@ class BaseSpecializedAgent(ABC):
         )
 
         # Hard-enforce tool constraint even if LLM ignores it
-        if response.tool and response.tool not in allowed:
+        allowed_set = set(allowed)
+        rt = (response.tool or "").strip().lower()
+        if response.tool and rt not in allowed_set:
             self._log.warning(
                 "LLM tool overridden by constraint",
                 extra={
@@ -247,6 +291,8 @@ class BaseSpecializedAgent(ABC):
                 },
             )
             response = response.model_copy(update={"tool": default_tool})
+        elif response.tool and rt in allowed_set and rt != response.tool:
+            response = response.model_copy(update={"tool": rt})
 
         return response
 

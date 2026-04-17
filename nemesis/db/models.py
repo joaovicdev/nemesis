@@ -186,6 +186,17 @@ class AgentResponse(BaseModel):
         return None
 
 
+class AttackChainSuggestion(BaseModel):
+    """LLM-suggested follow-up action for attack chaining (in-memory / TUI only)."""
+
+    action: str
+    tool: str
+    target: str
+    port: str = ""
+    rationale: str = ""
+    destructive: bool = False
+
+
 # ── SQL DDL ────────────────────────────────────────────────────────────────────
 
 CREATE_TABLES_SQL: list[str] = [

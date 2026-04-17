@@ -39,6 +39,7 @@ from nemesis.core.wordlists import (
 )
 from nemesis.db.database import Database
 from nemesis.db.models import (
+    AttackChainSuggestion,
     AttackPlan,
     ChatEntry,
     ControlMode,
@@ -50,8 +51,27 @@ from nemesis.db.models import (
     SessionPhase,
     TaskRecord,
 )
+from nemesis.tools.agent_allowlist import default_tool_label_for_step
+from nemesis.tools.base import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_scope_target(raw: str) -> str:
+    """Strip URL scheme, path, and port for scope checks."""
+    t = raw.strip()
+    lower = t.lower()
+    if lower.startswith("https://"):
+        t = t[8:]
+    elif lower.startswith("http://"):
+        t = t[7:]
+    if "/" in t:
+        t = t.split("/", 1)[0]
+    host = t
+    if ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host.strip()
+
 
 _CONVERSATION_SYSTEM = (
     "You are NEMESIS, an AI penetration testing co-pilot. "
@@ -76,6 +96,7 @@ class OrchestratorResponse:
     findings: list[Finding] | None = None
     requires_confirmation: bool = False
     confirmation_action_id: str | None = None
+    attack_chain_suggestions: list[AttackChainSuggestion] = field(default_factory=list)
 
 
 @dataclass
@@ -121,6 +142,7 @@ class Orchestrator:
         self._running_executors: dict[str, asyncio.Task[ExecutorResult]] = {}
         self._pending_recon: _PendingRecon | None = None
         self._pending_step: PlanStep | None = None
+        self._pending_chain_suggestion: AttackChainSuggestion | None = None
         self._active_plan: AttackPlan | None = None
         self._loop_plan: AttackPlan | None = None
         self._loop_max_parallel: int = 1
@@ -215,6 +237,7 @@ class Orchestrator:
             findings=loop_response.findings,
             requires_confirmation=loop_response.requires_confirmation,
             confirmation_action_id=loop_response.confirmation_action_id,
+            attack_chain_suggestions=loop_response.attack_chain_suggestions,
         )
 
     # ── Step-mode confirmation ──────────────────────────────────────────────
@@ -244,8 +267,17 @@ class Orchestrator:
                     findings=step_response.findings,
                     requires_confirmation=continuation.requires_confirmation,
                     confirmation_action_id=continuation.confirmation_action_id,
+                    attack_chain_suggestions=step_response.attack_chain_suggestions,
                 )
             return step_response
+
+        if action_id.startswith("chain:"):
+            self._context.record_destructive_confirmation(action_id)
+            if self._pending_chain_suggestion is None:
+                return OrchestratorResponse(text="No pending chain action to confirm.")
+            pending = self._pending_chain_suggestion
+            self._pending_chain_suggestion = None
+            return await self._execute_chain_tool(pending)
 
         if action_id == "initial_recon":
             self._context.record_destructive_confirmation(action_id)
@@ -266,6 +298,7 @@ class Orchestrator:
         """Discard the current pending confirmation without running it."""
         self._pending_recon = None
         self._pending_step = None
+        self._pending_chain_suggestion = None
         self._loop_plan = None
 
     # ── Main message entry point ───────────────────────────────────────────
@@ -407,7 +440,8 @@ class Orchestrator:
 
         Falls back to _execute_tool() if the agent name is not registered.
         """
-        if "ffuf" in step.required_tools or step.agent == "ffuf_agent":
+        _req_ffuf = [str(t).lower() for t in (step.required_tools or [])]
+        if "ffuf" in _req_ffuf or step.agent == "ffuf_agent":
             step.args.setdefault("wordlist", KALI_DEFAULT_SENTINEL)
             try:
                 resolved = resolve_ffuf_wordlist(
@@ -436,7 +470,9 @@ class Orchestrator:
                     "step_id": step.id,
                 },
             )
-            first_tool = step.required_tools[0] if step.required_tools else "nmap"
+            first_tool = default_tool_label_for_step(step.agent, list(step.required_tools or []))
+            if first_tool not in TOOL_REGISTRY:
+                first_tool = next(iter(sorted(TOOL_REGISTRY.keys())), "nmap")
             target = step.args.get("target", self._context.project.targets[0])
             extra_args: list[str] = [str(a) for a in step.args.get("extra_args", [])]
             return await self._execute_tool(first_tool, target, extra_args)
@@ -445,7 +481,7 @@ class Orchestrator:
             project_id=self._context.project.id,
             session_id=self._context.session.id,
             label=step.name,
-            tool=step.required_tools[0] if step.required_tools else step.agent,
+            tool=default_tool_label_for_step(step.agent, list(step.required_tools or [])),
             status="running",
         )
         await self._db.create_task(task_record)
@@ -521,9 +557,14 @@ class Orchestrator:
         if agent_response.next_step:
             lines.append(f"\nSuggested next: _{agent_response.next_step}_")
 
+        chain: list[AttackChainSuggestion] = []
+        if new_findings:
+            chain = await self._analyst.suggest_attack_chain(new_findings)
+
         return OrchestratorResponse(
             text="\n".join(lines),
             findings=new_findings if new_findings else None,
+            attack_chain_suggestions=chain,
         )
 
     # ── Execution loop ─────────────────────────────────────────────────────
@@ -619,13 +660,14 @@ class Orchestrator:
         step = ready[0]
         self._pending_step = step
 
-        first_tool = step.required_tools[0] if step.required_tools else step.agent
+        first_tool = default_tool_label_for_step(step.agent, list(step.required_tools or []))
         target = step.args.get(
             "target",
             self._context.project.targets[0] if self._context.project.targets else "?",
         )
         extra_line = ""
-        if "ffuf" in step.required_tools or step.agent == "ffuf_agent":
+        req_lower = [str(t).lower() for t in (step.required_tools or [])]
+        if "ffuf" in req_lower or step.agent == "ffuf_agent":
             step.args.setdefault("wordlist", KALI_DEFAULT_SENTINEL)
             suggested = suggest_ffuf_wordlist_display(
                 str(step.args.get("wordlist") or KALI_DEFAULT_SENTINEL),
@@ -710,6 +752,52 @@ class Orchestrator:
         )
 
     # ── Core execution ─────────────────────────────────────────────────────
+
+    async def _execute_chain_tool(self, suggestion: AttackChainSuggestion) -> OrchestratorResponse:
+        """Run a single chain suggestion via the executor path."""
+        extra: list[str] | None = None
+        if suggestion.port.strip() and suggestion.tool.lower() == "nmap":
+            extra = ["-p", suggestion.port.strip()]
+        return await self._execute_tool(
+            suggestion.tool.strip(),
+            suggestion.target.strip(),
+            extra,
+        )
+
+    async def execute_chain_suggestion(
+        self, suggestion: AttackChainSuggestion
+    ) -> OrchestratorResponse:
+        """
+        Validate scope and run a chain suggestion, or require confirmation if destructive.
+        """
+        if suggestion.tool.lower() != "searchsploit":
+            try:
+                self._context.assert_in_scope(_normalize_scope_target(suggestion.target))
+            except ValueError as exc:
+                return OrchestratorResponse(text=str(exc))
+
+        if suggestion.destructive:
+            action_id = f"chain:{uuid.uuid4().hex[:12]}"
+            self._pending_chain_suggestion = suggestion
+            logger.info(
+                "Chain action awaiting destructive confirmation",
+                extra={
+                    "event": "orchestrator.chain_pending",
+                    "action_id": action_id,
+                },
+            )
+            return OrchestratorResponse(
+                text=(
+                    "**Destructive / high-impact action**\n\n"
+                    f"**{suggestion.action}**\n"
+                    f"`{suggestion.tool}` on `{suggestion.target}`\n\n"
+                    "**Continue? (y/n)**"
+                ),
+                requires_confirmation=True,
+                confirmation_action_id=action_id,
+            )
+
+        return await self._execute_chain_tool(suggestion)
 
     async def _execute_tool(
         self,
@@ -802,12 +890,17 @@ class Orchestrator:
             self._context.advance_phase(SessionPhase.ENUMERATION)
             await self._db.update_session_phase(self._context.session.id, SessionPhase.ENUMERATION)
 
+        chain: list[AttackChainSuggestion] = []
+        if findings:
+            chain = await self._analyst.suggest_attack_chain(findings)
+
         if not findings:
             return OrchestratorResponse(
                 text=(
                     f"`{tool}` completed on `{target}` in "
                     f"{result.elapsed_seconds:.1f}s. No findings extracted."
-                )
+                ),
+                attack_chain_suggestions=chain,
             )
 
         lines = [
@@ -820,7 +913,11 @@ class Orchestrator:
                 f"  [{f.severity.value.upper()}] {f.title}"
                 f" — {f.target}:{f.port or '?'} [{status_tag}]"
             )
-        return OrchestratorResponse(text="\n".join(lines), findings=findings)
+        return OrchestratorResponse(
+            text="\n".join(lines),
+            findings=findings,
+            attack_chain_suggestions=chain,
+        )
 
     # ── LLM conversation ───────────────────────────────────────────────────
 

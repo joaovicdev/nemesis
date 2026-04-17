@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from pydantic import ValidationError
 
 from nemesis.agents.llm_client import LLMClient, LLMError
+from nemesis.agents.specialized import AGENT_REGISTRY
 from nemesis.core.project import ProjectContext
 from nemesis.db.models import AttackPlan, PlanStep, PlanStepStatus
+from nemesis.tools.base import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """\
+
+def _planner_system_prompt() -> str:
+    """System prompt with tool and agent lists from the live manifest and agent registry."""
+    tools = sorted(TOOL_REGISTRY.keys())
+    agents = sorted(AGENT_REGISTRY.keys())
+    tools_json = json.dumps(tools)
+    agents_json = json.dumps(agents)
+    return f"""\
 You are NEMESIS PlannerAgent, an AI penetration testing strategist.
 Your sole job is to produce a structured, multi-step attack plan for an authorized engagement.
 
@@ -20,29 +30,30 @@ Rules:
 - Output valid JSON only — no markdown fences, no extra text outside the JSON object.
 - Each step must have a unique id in the format "step-NNN" (zero-padded, starting at 001).
 - depends_on must only reference ids of earlier steps in the same plan.
-- required_tools must be a subset of: ["nmap", "whois", "dig", "gobuster", "nikto", "nuclei", "ffuf"].
-- agent must be one of: "recon_agent", "scanning_agent", "enumeration_agent", "vulnerability_agent", "nuclei_agent", "ffuf_agent".
+- required_tools must be a subset of: {tools_json} (only tools installed on this host are listed).
+- agent must be one of: {agents_json}.
 - Keep the plan focused: 3–7 steps covering the full engagement lifecycle.
 
 For ffuf steps (agent == "ffuf_agent"), args MAY include:
   - "wordlist": "kali_default" or an absolute filesystem path to a wordlist.
 
 Output schema (strict):
-{
+{{
   "goal": "<concise description of what the plan achieves>",
   "steps": [
-    {
+    {{
       "id": "step-001",
       "name": "<short name>",
       "description": "<what this step does and why>",
       "required_tools": ["<tool>"],
       "depends_on": [],
       "agent": "<agent_name>",
-      "args": {"target": "<primary target>"}
-    }
+      "args": {{"target": "<primary target>"}}
+    }}
   ]
-}
+}}
 """
+
 
 _USER_PROMPT_TEMPLATE = """\
 Engagement summary (may include separate client context and pentest goals):
@@ -113,7 +124,7 @@ class PlannerAgent:
         try:
             raw = await self._llm.chat_json(
                 [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": _planner_system_prompt()},
                     {"role": "user", "content": prompt},
                 ]
             )

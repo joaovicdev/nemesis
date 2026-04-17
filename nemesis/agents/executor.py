@@ -3,6 +3,9 @@
 Each Executor is short-lived: one instantiation per tool invocation.
 Raw output is NEVER sent directly to the Orchestrator — it must pass through
 the Analyst first.
+
+Command lines are built exclusively from ToolDefinition (kali_tools.yml) plus
+target and extra_args — no per-tool executor subclasses.
 """
 
 from __future__ import annotations
@@ -15,9 +18,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from nemesis.core.config import config
-from nemesis.core.wordlists import resolve_ffuf_wordlist
+from nemesis.core.wordlists import resolve_ffuf_wordlist, resolve_gobuster_dir_wordlist
+from nemesis.tools.base import TOOL_REGISTRY, ToolDefinition
 
 logger = logging.getLogger(__name__)
+
+_NUCLEI_DEFAULT_SEVERITY = "medium,high,critical"
 
 
 @dataclass
@@ -42,30 +48,139 @@ class ScopeViolationError(Exception):
     """Raised when execution is attempted against an out-of-scope target."""
 
 
-class BaseExecutor:
-    """
-    Base class for all Executor agents.
+def _target_url(target: str) -> str:
+    t = target.strip()
+    if t.startswith(("http://", "https://")):
+        return t
+    return f"http://{t}"
 
-    Subclasses implement `_build_command()` for tool-specific argument construction.
-    All execution goes through `run()`, which enforces timeouts and captures output.
-    """
 
-    # Override in subclasses
-    TOOL_NAME: str = ""
-    TOOL_BINARY: str = ""
-    DESTRUCTIVE: bool = False
+def _expand_arg_placeholders(token: str, target: str) -> str:
+    """Replace placeholders inside a single argv token."""
+    out = token
+    out = out.replace("{target}", target)
+    out = out.replace("{target_url}", _target_url(target))
+    if "{wordlist_ffuf}" in out:
+        out = out.replace(
+            "{wordlist_ffuf}",
+            resolve_ffuf_wordlist(None, config.default_ffuf_wordlist),
+        )
+    if "{wordlist_gobuster}" in out:
+        out = out.replace("{wordlist_gobuster}", resolve_gobuster_dir_wordlist())
+    return out
+
+
+def _expand_default_args(default_args: list[str], target: str) -> list[str]:
+    return [_expand_arg_placeholders(a, target) for a in default_args]
+
+
+def _ffuf_extra_has_wordlist(extra_args: list[str]) -> bool:
+    for i, a in enumerate(extra_args):
+        if a == "-w" or a == "--wordlist":
+            return True
+        if a.startswith("-w") and len(a) > 2:
+            return True
+        if a == "-w" and i + 1 < len(extra_args):
+            return True
+    return False
+
+
+def _gobuster_extra_has_wordlist(extra_args: list[str]) -> bool:
+    for i, a in enumerate(extra_args):
+        if a in ("-w", "--wordlist"):
+            return True
+        if a.startswith("-w") and len(a) > 2 and not a.startswith("-wo"):
+            return True
+        if a == "-w" and i + 1 < len(extra_args):
+            return True
+    return False
+
+
+def build_argv(defn: ToolDefinition, target: str, extra_args: list[str]) -> list[str]:
+    """
+    Build argv for subprocess from manifest definition, target, and extra args.
+
+    Raises:
+        ValueError: Unknown invocation_profile.
+        FileNotFoundError: Wordlist resolution failed (ffuf / gobuster profiles).
+    """
+    binary = defn.binary
+    profile = (defn.invocation_profile or "").strip()
+
+    if profile == "nmap_default_kali":
+        return [binary, "-sV", "-sC", "-T4", target, *extra_args]
+
+    if profile == "ffuf_kali":
+        target_url = _target_url(target)
+        cmd = [
+            binary,
+            "-u",
+            f"{target_url}/FUZZ",
+            "-mc",
+            "all",
+            "-ac",
+            "-of",
+            "json",
+            "-o",
+            "/dev/stdout",
+            "-s",
+        ]
+        if not _ffuf_extra_has_wordlist(extra_args):
+            cmd += ["-w", resolve_ffuf_wordlist(None, config.default_ffuf_wordlist)]
+        return cmd + extra_args
+
+    if profile == "gobuster_dir_kali":
+        base = [binary, "dir", "-u", _target_url(target), "-q", "--no-progress"]
+        if not _gobuster_extra_has_wordlist(extra_args):
+            base += ["-w", resolve_gobuster_dir_wordlist()]
+        return base + extra_args
+
+    if profile == "nuclei_default_kali":
+        cmd = [
+            binary,
+            "-u",
+            _target_url(target),
+            "-severity",
+            _NUCLEI_DEFAULT_SEVERITY,
+            "-silent",
+            "-no-color",
+        ]
+        return cmd + extra_args
+
+    if profile:
+        raise ValueError(f"Unknown invocation_profile '{profile}' for tool '{defn.name}'")
+
+    expanded = _expand_default_args(defn.default_args, target)
+    return [binary, *expanded, *extra_args]
+
+
+class ManifestExecutor:
+    """Runs an external binary using argv from ToolDefinition (manifest-only)."""
 
     def __init__(
         self,
+        definition: ToolDefinition,
         task_id: str,
         target: str,
         extra_args: list[str] | None = None,
         timeout: int = 300,
     ) -> None:
+        self._defn = definition
         self.task_id = task_id
         self.target = target
         self.extra_args = extra_args or []
         self.timeout = timeout
+
+    @property
+    def tool_name(self) -> str:
+        return self._defn.name
+
+    @property
+    def destructive(self) -> bool:
+        return self._defn.destructive
+
+    def _build_command(self, _binary: str) -> list[str]:
+        return build_argv(self._defn, self.target, self.extra_args)
 
     async def run(self) -> ExecutorResult:
         """
@@ -74,13 +189,16 @@ class BaseExecutor:
         Does NOT interpret or analyze the output — that is the Analyst's job.
         """
         binary = self._resolve_binary()
-        cmd = self._build_command(binary)
+        try:
+            cmd = self._build_command(binary)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
         logger.info(
             "Tool execution started",
             extra={
                 "event": "executor.tool_started",
-                "tool": self.TOOL_NAME,
+                "tool": self._defn.name,
                 "task_id": self.task_id,
             },
         )
@@ -104,7 +222,7 @@ class BaseExecutor:
                     "Tool timed out",
                     extra={
                         "event": "executor.tool_timeout",
-                        "tool": self.TOOL_NAME,
+                        "tool": self._defn.name,
                         "task_id": self.task_id,
                         "timeout_s": self.timeout,
                         "elapsed_ms": elapsed_ms,
@@ -115,7 +233,7 @@ class BaseExecutor:
 
         except FileNotFoundError as exc:
             raise ToolNotFoundError(
-                f"Tool '{self.TOOL_BINARY}' not found. "
+                f"Tool '{self._defn.binary}' not found. "
                 f"Install it or set the correct path in config."
             ) from exc
 
@@ -126,7 +244,7 @@ class BaseExecutor:
             "Tool execution completed",
             extra={
                 "event": "executor.tool_completed",
-                "tool": self.TOOL_NAME,
+                "tool": self._defn.name,
                 "task_id": self.task_id,
                 "exit_code": exit_code,
                 "elapsed_ms": round(elapsed * 1000),
@@ -138,7 +256,7 @@ class BaseExecutor:
 
         return ExecutorResult(
             task_id=self.task_id,
-            tool=self.TOOL_NAME,
+            tool=self._defn.name,
             target=self.target,
             exit_code=exit_code,
             stdout=stdout_str,
@@ -153,13 +271,16 @@ class BaseExecutor:
     ) -> ExecutorResult:
         """Run the tool and fire on_line() for each stdout line in real-time."""
         binary = self._resolve_binary()
-        cmd = self._build_command(binary)
+        try:
+            cmd = self._build_command(binary)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
         logger.info(
             "Tool streaming started",
             extra={
                 "event": "executor.tool_started",
-                "tool": self.TOOL_NAME,
+                "tool": self._defn.name,
                 "task_id": self.task_id,
                 "mode": "streaming",
             },
@@ -174,7 +295,7 @@ class BaseExecutor:
             )
         except FileNotFoundError as exc:
             raise ToolNotFoundError(
-                f"Tool '{self.TOOL_BINARY}' not found. "
+                f"Tool '{self._defn.binary}' not found. "
                 f"Install it or set the correct path in config."
             ) from exc
 
@@ -193,7 +314,7 @@ class BaseExecutor:
             "Tool streaming completed",
             extra={
                 "event": "executor.tool_completed",
-                "tool": self.TOOL_NAME,
+                "tool": self._defn.name,
                 "task_id": self.task_id,
                 "exit_code": exit_code,
                 "elapsed_ms": round(elapsed * 1000),
@@ -205,7 +326,7 @@ class BaseExecutor:
         )
         return ExecutorResult(
             task_id=self.task_id,
-            tool=self.TOOL_NAME,
+            tool=self._defn.name,
             target=self.target,
             exit_code=exit_code,
             stdout=stdout_joined,
@@ -214,13 +335,9 @@ class BaseExecutor:
             success=exit_code == 0,
         )
 
-    def _build_command(self, binary: str) -> list[str]:
-        """Override to construct the tool-specific argument list."""
-        raise NotImplementedError
-
     def _resolve_binary(self) -> str:
         """Resolve binary path, checking it exists on PATH."""
-        binary = self.TOOL_BINARY or self.TOOL_NAME
+        binary = self._defn.binary
         if not shutil.which(binary):
             raise ToolNotFoundError(
                 f"'{binary}' not found on PATH. "
@@ -229,180 +346,27 @@ class BaseExecutor:
         return binary
 
 
-# ── Concrete executor stubs — full implementation in next milestone ────────────
-
-
-class NmapExecutor(BaseExecutor):
-    """Runs nmap against a target."""
-
-    TOOL_NAME = "nmap"
-    TOOL_BINARY = "nmap"
-    DESTRUCTIVE = False
-
-    def _build_command(self, binary: str) -> list[str]:
-        return [binary, "-sV", "-sC", "-T4", self.target, *self.extra_args]
-
-
-class WhoisExecutor(BaseExecutor):
-    """Runs whois lookup."""
-
-    TOOL_NAME = "whois"
-    TOOL_BINARY = "whois"
-    DESTRUCTIVE = False
-
-    def _build_command(self, binary: str) -> list[str]:
-        return [binary, self.target, *self.extra_args]
-
-
-class GobusterExecutor(BaseExecutor):
-    """Runs gobuster directory brute-force."""
-
-    TOOL_NAME = "gobuster"
-    TOOL_BINARY = "gobuster"
-    DESTRUCTIVE = False
-
-    DEFAULT_WORDLIST = "/usr/share/wordlists/dirb/common.txt"
-
-    def _build_command(self, binary: str) -> list[str]:
-        wordlist = next((a for a in self.extra_args if a.startswith("-w")), None)
-        base = [binary, "dir", "-u", self.target, "-q", "--no-progress"]
-        if not wordlist:
-            base += ["-w", self.DEFAULT_WORDLIST]
-        return base + self.extra_args
-
-
-class NiktoExecutor(BaseExecutor):
-    """Runs nikto web vulnerability scanner."""
-
-    TOOL_NAME = "nikto"
-    TOOL_BINARY = "nikto"
-    DESTRUCTIVE = False
-
-    def _build_command(self, binary: str) -> list[str]:
-        return [binary, "-h", self.target, "-Format", "txt", *self.extra_args]
-
-
-class FfufExecutor(BaseExecutor):
-    """Runs ffuf for fast web content discovery and fuzzing."""
-
-    TOOL_NAME = "ffuf"
-    TOOL_BINARY = "ffuf"
-    DESTRUCTIVE = False
-
-    def _build_command(self, binary: str) -> list[str]:
-        has_wordlist = any(a == "-w" or a.startswith("-w") for a in self.extra_args)
-
-        target_url = self.target
-        if not target_url.startswith(("http://", "https://")):
-            target_url = f"http://{target_url}"
-
-        cmd = [
-            binary,
-            "-u",
-            f"{target_url}/FUZZ",
-            "-mc",
-            "all",
-            "-ac",
-            "-of",
-            "json",
-            "-o",
-            "/dev/stdout",
-            "-s",
-        ]
-
-        if not has_wordlist:
-            cmd += ["-w", resolve_ffuf_wordlist(None, config.default_ffuf_wordlist)]
-
-        return cmd + self.extra_args
-
-
-class DigExecutor(BaseExecutor):
-    """Runs DNS enumeration with dig."""
-
-    TOOL_NAME = "dig"
-    TOOL_BINARY = "dig"
-    DESTRUCTIVE = False
-
-    def _build_command(self, binary: str) -> list[str]:
-        return [binary, "ANY", self.target, *self.extra_args]
-
-
-class AmassExecutor(BaseExecutor):
-    """Runs amass subdomain enumeration."""
-
-    TOOL_NAME = "amass"
-    TOOL_BINARY = "amass"
-    DESTRUCTIVE = False
-
-    def _build_command(self, binary: str) -> list[str]:
-        base = [binary, "enum", "-passive", "-d", self.target]
-        return base + self.extra_args
-
-
-class SearchsploitExecutor(BaseExecutor):
-    """Runs searchsploit to find known exploits for a CVE or keyword."""
-
-    TOOL_NAME = "searchsploit"
-    TOOL_BINARY = "searchsploit"
-    DESTRUCTIVE = False
-
-    def _build_command(self, binary: str) -> list[str]:
-        return [
-            binary,
-            "--json",
-            "--disable-colour",
-            self.target,
-            *self.extra_args,
-        ]
-
-
-class NucleiExecutor(BaseExecutor):
-    """Runs nuclei template-based vulnerability scanner."""
-
-    TOOL_NAME = "nuclei"
-    TOOL_BINARY = "nuclei"
-    DESTRUCTIVE = False
-
-    # Severity levels to include (can be overridden via extra_args)
-    DEFAULT_SEVERITY = "medium,high,critical"
-
-    def _build_command(self, binary: str) -> list[str]:
-        # -u target, -severity filter, -silent (machine-readable), -no-color output
-        cmd = [
-            binary,
-            "-u",
-            self.target,
-            "-severity",
-            self.DEFAULT_SEVERITY,
-            "-silent",
-            "-no-color",
-        ]
-        return cmd + self.extra_args
-
-
-# Registry: maps tool name → executor class
-EXECUTOR_REGISTRY: dict[str, type[BaseExecutor]] = {
-    "nmap": NmapExecutor,
-    "whois": WhoisExecutor,
-    "gobuster": GobusterExecutor,
-    "nikto": NiktoExecutor,
-    "ffuf": FfufExecutor,
-    "dig": DigExecutor,
-    "amass": AmassExecutor,
-    "searchsploit": SearchsploitExecutor,
-    "nuclei": NucleiExecutor,
-}
-
-
 def get_executor(
     tool: str,
     task_id: str,
     target: str,
     extra_args: list[str] | None = None,
     timeout: int = 300,
-) -> BaseExecutor:
-    """Factory — returns the appropriate executor for a given tool name."""
-    cls = EXECUTOR_REGISTRY.get(tool.lower())
-    if cls is None:
-        raise ValueError(f"Unknown tool '{tool}'. Available: {list(EXECUTOR_REGISTRY.keys())}")
-    return cls(task_id=task_id, target=target, extra_args=extra_args, timeout=timeout)
+) -> ManifestExecutor:
+    """Return a manifest-backed executor for an installed tool name."""
+    key = tool.lower().strip()
+    defn = TOOL_REGISTRY.get(key)
+    if defn is None:
+        available = sorted(TOOL_REGISTRY.keys())
+        raise ValueError(f"Unknown tool '{tool}'. Available: {available}")
+    return ManifestExecutor(
+        defn,
+        task_id=task_id,
+        target=target,
+        extra_args=extra_args,
+        timeout=timeout,
+    )
+
+
+# Back-compat alias for code expecting BaseExecutor typing
+BaseExecutor = ManifestExecutor

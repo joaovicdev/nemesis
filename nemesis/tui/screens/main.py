@@ -16,6 +16,7 @@ from nemesis.agents.llm_client import LLMClient
 from nemesis.agents.orchestrator import Orchestrator, OrchestratorResponse
 from nemesis.core.project import ProjectContext
 from nemesis.db.models import (
+    AttackChainSuggestion,
     AttackPlan,
     ChatEntry,
     Finding,
@@ -27,6 +28,7 @@ from nemesis.db.models import (
     Session,
 )
 from nemesis.tui.widgets.agent_output import AgentOutputPanel
+from nemesis.tui.widgets.attack_chain import AttackChainWidget
 from nemesis.tui.widgets.chat_panel import ChatPanel
 from nemesis.tui.widgets.context_panel import ContextPanel, ProjectSummary
 from nemesis.tui.widgets.finding_card import FindingCard
@@ -345,6 +347,47 @@ class MainScreen(Screen[None]):
         if self._project_ctx:
             status = self.query_one("#status-bar", StatusBar)
             status.update_phase(self._project_ctx.current_phase.value.upper())
+
+        if response.attack_chain_suggestions:
+            self._show_attack_chain_widget(response.attack_chain_suggestions)
+
+    def _show_attack_chain_widget(self, suggestions: list[AttackChainSuggestion]) -> None:
+        """Mount chain suggestions in the cards area (replace any prior chain card)."""
+        cards = self.query_one("#cards-area", Vertical)
+        for existing in cards.query(AttackChainWidget):
+            existing.remove()
+        cards.mount(AttackChainWidget(suggestions))
+
+    def on_attack_chain_widget_suggestion_selected(
+        self, event: AttackChainWidget.SuggestionSelected
+    ) -> None:
+        if self._orchestrator_busy or self._orchestrator is None:
+            return
+        self.run_worker(
+            self._execute_chain_suggestion(event.suggestion),
+            exclusive=False,
+            name="chain-exec",
+        )
+
+    def on_attack_chain_widget_dismissed(self, _event: AttackChainWidget.Dismissed) -> None:
+        """Widget removes itself; nothing else required."""
+
+    async def _execute_chain_suggestion(self, suggestion: AttackChainSuggestion) -> None:
+        if self._orchestrator is None:
+            return
+        self._orchestrator_busy = True
+        chat = self.query_one("#chat-panel", ChatPanel)
+        chat.set_thinking(True)
+        try:
+            response = await self._orchestrator.execute_chain_suggestion(suggestion)
+        except Exception:
+            logger.exception("execute_chain_suggestion failed.")
+            self._reply_system(chat, "Chain action failed. Check logs.")
+        else:
+            self._on_orchestrator_response(response)
+        finally:
+            self._orchestrator_busy = False
+            chat.set_thinking(False)
 
     # ── StepConfirmWidget integration ──────────────────────────────────────
 

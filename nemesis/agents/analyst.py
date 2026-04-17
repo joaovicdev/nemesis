@@ -20,7 +20,8 @@ from datetime import datetime
 from nemesis.agents.executor import ExecutorResult, ToolNotFoundError, get_executor
 from nemesis.agents.llm_client import LLMClient, LLMError
 from nemesis.core.project import ProjectContext
-from nemesis.db.models import Finding, FindingSeverity, FindingStatus
+from nemesis.db.models import AttackChainSuggestion, Finding, FindingSeverity, FindingStatus
+from nemesis.tools.base import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,58 @@ Reply with this exact JSON structure:
 
 If there are no meaningful findings, reply with: {{"findings": []}}
 """
+
+
+def _chain_system_prompt() -> str:
+    """LLM system prompt for attack-chain suggestions; tool list follows the live manifest."""
+    allowed = ", ".join(sorted(TOOL_REGISTRY.keys()))
+    return (
+        "You are a red-team advisor for authorized penetration tests only. "
+        "Given structured findings (no raw scanner output), propose high-value next verification "
+        "steps. "
+        f"Suggest only tools from this exact set: {allowed}. "
+        "Targets must stay within the engagement scope described in the context. "
+        "Do not include credentials, exploit code, or step-by-step compromise instructions. "
+        "Set destructive to true only for actions that could lock accounts, cause denial of "
+        "service, or materially change production system state (e.g. aggressive brute forcing). "
+        "Reply with valid JSON only — no markdown, no explanation outside the JSON."
+    )
+
+
+_CHAIN_PROMPT = """\
+Engagement context:
+---
+{context_summary}
+---
+
+New findings (structured):
+---
+{findings_json}
+---
+
+Propose up to 5 concrete follow-up actions a tester should run next. Each action must use one
+of the allowed tools only. Prefer logical chaining (e.g. HTTP service -> nuclei or nikto on a
+full URL; SSH/SMB hints -> targeted nmap; CVE references -> searchsploit with the CVE id as
+target).
+
+Reply with this JSON shape:
+{{
+  "suggestions": [
+    {{
+      "action": "short label",
+      "tool": "nuclei",
+      "target": "hostname, IP, or full http(s) URL as required by the tool",
+      "port": "443 or empty string",
+      "rationale": "one sentence",
+      "destructive": false
+    }}
+  ]
+}}
+
+If nothing useful to suggest, reply: {{"suggestions": []}}
+"""
+
+_MAX_CHAIN_SUGGESTIONS = 5
 
 # Nmap open-port regex: matches lines like "22/tcp   open  ssh"
 _NMAP_OPEN_PORT_RE = re.compile(
@@ -199,6 +252,101 @@ class AnalystAgent:
             },
         )
         return findings
+
+    async def suggest_attack_chain(
+        self, new_findings: list[Finding]
+    ) -> list[AttackChainSuggestion]:
+        """
+        Second-pass LLM: propose concrete follow-up tools from structured new findings.
+
+        Returns an empty list if there are no findings, the LLM fails, or the response is invalid.
+        """
+        if not new_findings:
+            return []
+
+        context_summary = self._context.build_llm_context_summary()
+        rows: list[dict[str, object]] = []
+        for f in new_findings:
+            rows.append(
+                {
+                    "title": f.title,
+                    "severity": f.severity.value,
+                    "target": f.target,
+                    "port": f.port,
+                    "service": f.service,
+                    "cve_ids": f.cve_ids,
+                }
+            )
+        findings_json = json.dumps(rows, indent=2)
+        prompt = _CHAIN_PROMPT.format(
+            context_summary=context_summary,
+            findings_json=findings_json,
+        )
+
+        try:
+            parsed = await self._llm.chat_json(
+                [
+                    {"role": "system", "content": _chain_system_prompt()},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+        except LLMError as exc:
+            logger.warning(
+                "Attack chain suggestion LLM failed",
+                extra={
+                    "event": "analyst.chain_llm_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return []
+
+        raw_list = parsed.get("suggestions", [])
+        if not isinstance(raw_list, list):
+            logger.warning(
+                "Attack chain suggestions field is not a list",
+                extra={"event": "analyst.chain_bad_shape"},
+            )
+            return []
+
+        allowed = set(TOOL_REGISTRY.keys())
+        out: list[AttackChainSuggestion] = []
+        for item in raw_list[:_MAX_CHAIN_SUGGESTIONS]:
+            if not isinstance(item, dict):
+                continue
+            tool = str(item.get("tool", "")).strip().lower()
+            if tool not in allowed:
+                logger.debug(
+                    "Skipping chain suggestion: unknown tool",
+                    extra={"event": "analyst.chain_tool_filtered", "tool": tool},
+                )
+                continue
+            action = str(item.get("action", "")).strip()
+            target = str(item.get("target", "")).strip()
+            if not action or not target:
+                continue
+            try:
+                out.append(
+                    AttackChainSuggestion(
+                        action=action,
+                        tool=tool,
+                        target=target,
+                        port=str(item.get("port", "") or "").strip(),
+                        rationale=str(item.get("rationale", "") or "").strip(),
+                        destructive=bool(item.get("destructive", False)),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "Skipping malformed chain suggestion row",
+                    extra={"event": "analyst.chain_row_invalid"},
+                )
+                continue
+
+        logger.info(
+            "Attack chain suggestions generated",
+            extra={"event": "analyst.chain_suggestions", "count": len(out)},
+        )
+        return out
 
     async def _enrich_with_exploits(self, findings: list[Finding]) -> None:
         """
@@ -394,6 +542,12 @@ def _regex_fallback(result: ExecutorResult) -> list[dict[str, object]]:
         return _parse_nuclei_output(result.stdout)
     if result.tool == "ffuf":
         return _parse_ffuf_output(result.stdout)
+
+    defn = TOOL_REGISTRY.get(result.tool.lower())
+    if defn and defn.output_format == "json":
+        ff = _parse_ffuf_output(result.stdout)
+        if ff:
+            return ff
     return []
 
 

@@ -1,14 +1,13 @@
 """ReconAgent — passive OSINT, DNS, and WHOIS specialist.
 
-Allowed tools: whois, dig  (amass added in PLAN 4)
-System prompt: OSINT-focused passive recon persona
-Fallback: run whois on the first target when LLM is unreachable
+Allowed tools: manifest phase=recon (installed). Fallback prefers whois.
 """
 
 from __future__ import annotations
 
 from nemesis.agents.specialized.base import BaseSpecializedAgent
 from nemesis.db.models import AgentResponse, PlanStep
+from nemesis.tools.agent_allowlist import pick_fallback_tool
 
 _RECON_SYSTEM = """\
 You are a reconnaissance specialist agent within NEMESIS, an authorized \
@@ -18,9 +17,6 @@ Focus on low-noise techniques that do not generate alerts on the target.
 You MUST only use tools from the allowed list provided to you.
 Always respond with valid JSON only — no markdown, no explanation outside the JSON.\
 """
-
-ALLOWED_TOOLS: list[str] = ["whois", "dig", "amass"]
-
 
 class ReconAgent(BaseSpecializedAgent):
     """
@@ -33,14 +29,23 @@ class ReconAgent(BaseSpecializedAgent):
 
     AGENT_NAME = "recon_agent"
     SYSTEM_PROMPT = _RECON_SYSTEM
-    ALLOWED_TOOLS = ALLOWED_TOOLS
 
     def _fallback_action(self, step: PlanStep, target: str) -> AgentResponse:
-        """When LLM is unreachable, default to whois on the target."""
+        """When LLM is unreachable, default to whois if available in manifest allowlist."""
+        tool = pick_fallback_tool(self.AGENT_NAME, "whois")
+        if not tool:
+            return AgentResponse(
+                thought="No recon tools in registry.",
+                action="error",
+                tool=None,
+                args={},
+                result="No recon-phase tools installed.",
+                next_step=None,
+            )
         return AgentResponse(
-            thought=f"LLM unavailable — running default whois on {target}",
+            thought=f"LLM unavailable — running default {tool} on {target}",
             action="run_tool",
-            tool="whois",
+            tool=tool,
             args={},
             result="",
             next_step=None,

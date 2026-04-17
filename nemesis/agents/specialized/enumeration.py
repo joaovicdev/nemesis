@@ -15,6 +15,7 @@ from nemesis.agents.llm_client import LLMClient
 from nemesis.agents.specialized.base import BaseSpecializedAgent
 from nemesis.core.project import ProjectContext
 from nemesis.db.models import AgentResponse, PlanStep
+from nemesis.tools.agent_allowlist import pick_fallback_tool
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +24,12 @@ You are a web enumeration specialist agent within NEMESIS, an authorized \
 penetration testing platform.
 Your job: web directory brute-forcing, web server probing, and HTTP service analysis.
 Only act on HTTP/HTTPS targets. Never scan out-of-scope hosts.
-Choose gobuster for directory enumeration and nikto for vulnerability scanning.
+Prefer gobuster for directory enumeration and nikto for vulnerability scanning when both appear in the allowed list.
 Always respond with valid JSON only — no markdown, no explanation outside the JSON.\
 """
 
 _WEB_SCHEMES = ("http://", "https://")
 _WEB_PORTS = {"80", "443", "8080", "8443", "8000", "8888"}
-
-ALLOWED_TOOLS: list[str] = ["gobuster", "nikto"]
 
 
 def _is_web_target(target: str) -> bool:
@@ -48,7 +47,6 @@ class EnumerationAgent(BaseSpecializedAgent):
 
     AGENT_NAME = "enumeration_agent"
     SYSTEM_PROMPT = _ENUMERATION_SYSTEM
-    ALLOWED_TOOLS = ALLOWED_TOOLS
 
     def __init__(
         self,
@@ -97,11 +95,21 @@ class EnumerationAgent(BaseSpecializedAgent):
         return await super().execute(step)
 
     def _fallback_action(self, step: PlanStep, target: str) -> AgentResponse:
-        """When LLM is unreachable, default to gobuster directory scan."""
+        """When LLM is unreachable, default to gobuster if in allowlist."""
+        tool = pick_fallback_tool(self.AGENT_NAME, "gobuster")
+        if not tool:
+            return AgentResponse(
+                thought="No enumeration tools in registry.",
+                action="error",
+                tool=None,
+                args={},
+                result="No enumeration-phase tools installed.",
+                next_step=None,
+            )
         return AgentResponse(
-            thought=f"LLM unavailable — running default gobuster dir scan on {target}",
+            thought=f"LLM unavailable — running default {tool} on {target}",
             action="run_tool",
-            tool="gobuster",
+            tool=tool,
             args={},
             result="",
             next_step=None,
