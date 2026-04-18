@@ -18,6 +18,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from nemesis.agents.analyst import AnalystAgent
 from nemesis.agents.executor import (
@@ -29,6 +30,7 @@ from nemesis.agents.executor import (
 from nemesis.agents.llm_client import LLMClient, LLMError
 from nemesis.agents.planner import PlannerAgent
 from nemesis.agents.specialized import get_agent
+from nemesis.core import plan_writer
 from nemesis.core.config import config
 from nemesis.core.logging_config import set_session_id
 from nemesis.core.project import ProjectContext
@@ -128,7 +130,7 @@ class Orchestrator:
         on_response: Callable[[OrchestratorResponse], None] | None = None,
         on_task_update: Callable[[str, str, str], None] | None = None,
         on_agent_output: Callable[[str, str], None] | None = None,
-        on_plan_ready: Callable[[AttackPlan], None] | None = None,
+        on_plan_ready: Callable[[AttackPlan, Path | None], None] | None = None,
     ) -> None:
         self._context = context
         self._db = db
@@ -146,6 +148,7 @@ class Orchestrator:
         self._active_plan: AttackPlan | None = None
         self._loop_plan: AttackPlan | None = None
         self._loop_max_parallel: int = 1
+        self._current_plan_md_path: Path | None = None
 
     async def start(self) -> None:
         """Initialize the Orchestrator for a session."""
@@ -209,6 +212,28 @@ class Orchestrator:
         await self._db.create_plan(plan)
         self._active_plan = plan
 
+        md_path: Path | None = None
+        try:
+            md_path = plan_writer.write(
+                plan,
+                self._context.project.name,
+                self._context.session.id,
+            )
+            self._current_plan_md_path = md_path
+            logger.info(
+                "Attack plan written to markdown",
+                extra={"event": "orchestrator.plan_markdown_saved", "path": str(md_path)},
+            )
+        except OSError as exc:
+            self._current_plan_md_path = None
+            logger.warning(
+                "Could not write plan markdown file",
+                extra={
+                    "event": "orchestrator.plan_markdown_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+
         plan_lines = [
             f"**Attack plan generated** — {len(plan.steps)} step(s):",
             f"_Goal: {plan.goal}_",
@@ -221,19 +246,27 @@ class Orchestrator:
             plan_lines.append(f"    _{step.description}_")
 
         plan_header = "\n".join(plan_lines)
+        path_line = (
+            f"\n_Plan file: `{md_path}`_\n"
+            if md_path is not None
+            else "\n_Plan file: (not saved)_\n"
+        )
 
         # If a TUI callback is registered, hand the plan off for approval and
         # let the TUI drive execution. Otherwise fall through to the loop here.
         if self._on_plan_ready is not None:
-            self._on_plan_ready(plan)
+            self._on_plan_ready(plan, md_path)
             return OrchestratorResponse(
-                text=f"{plan_header}\n\nReview the plan above and approve to start execution.",
+                text=(
+                    f"{plan_header}{path_line}\n"
+                    "Review the plan in the approval dialog and approve to start execution."
+                ),
             )
 
         self._emit_plan_to_tui(plan)
         loop_response = await self.run_plan_loop(plan)
         return OrchestratorResponse(
-            text=f"{plan_header}\n\n{loop_response.text}",
+            text=f"{plan_header}{path_line}\n\n{loop_response.text}",
             findings=loop_response.findings,
             requires_confirmation=loop_response.requires_confirmation,
             confirmation_action_id=loop_response.confirmation_action_id,

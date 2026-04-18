@@ -1,6 +1,6 @@
-# NEMESIS
-
 ![NEMESIS](banner.png)
+
+# NEMESIS
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,7 +8,7 @@
 [![LiteLLM](https://img.shields.io/badge/LLM-LiteLLM-6366f1)](https://github.com/BerriAI/litellm)
 [![Ollama](https://img.shields.io/badge/Default-Ollama-111827)](https://ollama.com)
 
-**AI-assisted penetration testing, not an autonomous hacker,. Your expert analyst, always at your side.**
+**AI-assisted penetration testing — not an autonomous hacker. Your expert analyst, always at your side.**
 
 ---
 
@@ -33,12 +33,12 @@
 
 ## Screenshots
 
-Drop in-app captures here to show the TUI (main layout, chat, attack-chain card, etc.). Use **sanitized** screenshots only — no real client names, scoped targets, credentials, or raw tool output from live engagements.
+Use **sanitized** screenshots only — no real client names, scoped targets, credentials, or raw tool output from live engagements.
 
-<!-- Example (uncomment and add files under docs/screenshots/):
-![Main interface](docs/screenshots/main.png)
-![Chat and findings](docs/screenshots/chat.png)
--->
+![NEMESIS](docs/screenshots/print1.png)
+![NEMESIS](docs/screenshots/print2.png)
+![NEMESIS](docs/screenshots/print3.png)
+![NEMESIS](docs/screenshots/print5.png)
 
 ---
 

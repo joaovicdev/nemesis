@@ -55,6 +55,11 @@ class NemesisConfig(BaseSettings):
     def db_path(self) -> Path:
         return self.data_dir / "nemesis.db"
 
+    @property
+    def plans_dir(self) -> Path:
+        """Directory for exported attack plan markdown files."""
+        return self.data_dir / "plans"
+
     # ── Tool paths (override if tools are in non-standard locations) ──────
     nmap_path: str = Field(default="nmap")
     gobuster_path: str = Field(default="gobuster")

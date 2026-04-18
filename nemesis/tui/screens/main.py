@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import ClassVar
 
 from textual.app import ComposeResult
@@ -557,7 +558,7 @@ class MainScreen(Screen[None]):
 
     # ── Plan approval flow ─────────────────────────────────────────────────
 
-    def _on_plan_ready(self, plan: AttackPlan) -> None:
+    def _on_plan_ready(self, plan: AttackPlan, md_path: Path | None) -> None:
         """Called by Orchestrator after PlannerAgent finishes — before execution."""
         from nemesis.tui.screens.plan_approval import PlanApprovalScreen
 
@@ -601,7 +602,7 @@ class MainScreen(Screen[None]):
         # update_step() above. This ensures TaskList and StatusBar have settled
         # in the compositor before the modal screen layers on top.
         self.call_after_refresh(
-            lambda: self.app.push_screen(PlanApprovalScreen(plan), _on_approved)
+            lambda: self.app.push_screen(PlanApprovalScreen(plan, md_path), _on_approved)
         )
 
     async def _execute_approved_plan(self, plan: AttackPlan) -> None:

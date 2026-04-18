@@ -154,6 +154,7 @@ class PlanStep(BaseModel):
     status: PlanStepStatus = PlanStepStatus.PENDING
     result_summary: str = ""
     findings_count: int = 0
+    analyst_briefing: dict[str, object] | None = None
 
 
 class AttackPlan(BaseModel):

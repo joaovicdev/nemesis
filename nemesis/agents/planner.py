@@ -37,6 +37,14 @@ Rules:
 For ffuf steps (agent == "ffuf_agent"), args MAY include:
   - "wordlist": "kali_default" or an absolute filesystem path to a wordlist.
 
+Each step MUST include "analyst_briefing": context for the human analyst before they approve
+execution — defensive tone, no exploit payloads or credential hints.
+  - objective: string — what this step should establish for the engagement
+  - look_for: array of strings — concrete signals or artifacts to watch for in tool output
+  - success_criteria: string — how to know the step succeeded
+  - risk_if_skipped: string — impact of skipping this step
+  - next_step_logic: string — how results should inform later steps (high level)
+
 Output schema (strict):
 {{
   "goal": "<concise description of what the plan achieves>",
@@ -48,7 +56,14 @@ Output schema (strict):
       "required_tools": ["<tool>"],
       "depends_on": [],
       "agent": "<agent_name>",
-      "args": {{"target": "<primary target>"}}
+      "args": {{"target": "<primary target>"}},
+      "analyst_briefing": {{
+        "objective": "<string>",
+        "look_for": ["<signal>", "..."],
+        "success_criteria": "<string>",
+        "risk_if_skipped": "<string>",
+        "next_step_logic": "<string>"
+      }}
     }}
   ]
 }}
@@ -64,6 +79,26 @@ Cover: OSINT/DNS recon → port/service scanning → web enumeration (if applica
 vulnerability assessment.
 Output JSON only.
 """
+
+
+def _coerce_analyst_briefing(raw: object) -> dict[str, object] | None:
+    """Normalize LLM analyst_briefing field for PlanStep."""
+    if raw is None or not isinstance(raw, dict):
+        return None
+    out: dict[str, object] = {}
+    for key in ("objective", "success_criteria", "risk_if_skipped", "next_step_logic"):
+        v = raw.get(key)
+        if v is not None and str(v).strip():
+            out[key] = str(v).strip()
+    look = raw.get("look_for")
+    if isinstance(look, list):
+        items = [str(x).strip() for x in look if str(x).strip()]
+        if items:
+            out["look_for"] = items
+    elif look is not None and str(look).strip():
+        out["look_for"] = [str(look).strip()]
+    return out if out else None
+
 
 _DEFAULT_PLAN_STEPS: list[dict] = [
     {
@@ -165,12 +200,20 @@ class PlannerAgent:
         steps: list[PlanStep] = []
         seen_ids: set[str] = set()
         for item in raw_steps:
+            if not isinstance(item, dict):
+                continue
             step_id = str(item.get("id", "")).strip()
             if not step_id or step_id in seen_ids:
                 continue
             seen_ids.add(step_id)
+            briefing = _coerce_analyst_briefing(item.get("analyst_briefing"))
+            payload = {**item, "status": PlanStepStatus.PENDING}
+            if briefing is not None:
+                payload["analyst_briefing"] = briefing
+            else:
+                payload.pop("analyst_briefing", None)
             try:
-                steps.append(PlanStep.model_validate({**item, "status": PlanStepStatus.PENDING}))
+                steps.append(PlanStep.model_validate(payload))
             except ValidationError:
                 logger.warning("Skipping invalid plan step: %s", item)
 

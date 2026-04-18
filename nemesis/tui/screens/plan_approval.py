@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import ClassVar
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static
+from textual.widgets import Input, Markdown, Static
 
+from nemesis.core.plan_writer import step_preview_markdown
 from nemesis.db.models import AttackPlan
 
 _AGENT_COLORS: dict[str, str] = {
@@ -21,6 +23,7 @@ _AGENT_COLORS: dict[str, str] = {
     "enumeration_agent": "#ff9500",
     "ffuf_agent": "#f48c06",
     "vulnerability_agent": "#ff2040",
+    "nuclei_agent": "#ff9500",
 }
 
 
@@ -34,6 +37,7 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
         Binding("a", "approve", "Approve & Run"),
         Binding("enter", "approve", "Approve & Run", show=False),
         Binding("e", "edit_step", "Edit Step"),
+        Binding("d", "delete_step", "Delete Step"),
         Binding("x", "cancel_plan", "Cancel"),
         Binding("escape", "cancel_plan", "Cancel", show=False),
         Binding("up", "move_up", "Move Up", show=False),
@@ -45,30 +49,57 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
         align: center middle;
     }
 
-    #approval-dialog {
+    PlanApprovalScreen #approval-dialog {
         background: #0f0f1a;
         border: tall #1a1a3a;
-        width: 74;
-        height: auto;
-        max-height: 44;
+        width: 95%;
+        height: 88%;
+        max-width: 120;
+        max-height: 48;
         padding: 0;
     }
 
-    #approval-header {
+    PlanApprovalScreen #approval-header {
         background: #0a0a0a;
         border-bottom: tall #1a1a3a;
         padding: 1 2;
         height: auto;
     }
 
-    #approval-steps {
-        padding: 1 2;
-        height: auto;
-        max-height: 28;
-        overflow-y: auto;
+    PlanApprovalScreen #approval-body {
+        height: 1fr;
+        min-height: 12;
     }
 
-    #approval-edit-input {
+    PlanApprovalScreen #approval-left {
+        width: 38%;
+        min-width: 24;
+        border-right: tall #1a1a3a;
+        padding: 0 1;
+    }
+
+    PlanApprovalScreen #approval-steps {
+        height: 1fr;
+        overflow-y: auto;
+        padding: 1 0;
+    }
+
+    PlanApprovalScreen #approval-preview {
+        width: 1fr;
+        min-width: 28;
+        padding: 0 1;
+    }
+
+    PlanApprovalScreen #approval-markdown {
+        height: 1fr;
+        overflow-y: auto;
+        background: #0a0a0a;
+        border: solid #1a1a3a;
+        padding: 0 1;
+        margin: 1 0;
+    }
+
+    PlanApprovalScreen #approval-edit-input {
         background: #0f0f1a;
         border: solid #1a1a3a;
         color: #c8c8d8;
@@ -76,7 +107,7 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
         display: none;
     }
 
-    #approval-footer {
+    PlanApprovalScreen #approval-footer {
         background: #0a0a0a;
         border-top: tall #1a1a3a;
         padding: 1 2;
@@ -84,16 +115,21 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
     }
     """
 
-    def __init__(self, plan: AttackPlan) -> None:
+    def __init__(self, plan: AttackPlan, md_path: Path | None = None) -> None:
         super().__init__()
         self._plan = plan
+        self._md_path = md_path
         self._selected_idx: int = 0
         self._editing: bool = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-dialog"):
             yield Static("", id="approval-header")
-            yield Static("", id="approval-steps")
+            with Horizontal(id="approval-body"):
+                with Vertical(id="approval-left"):
+                    yield Static("", id="approval-steps")
+                with Vertical(id="approval-preview"):
+                    yield Markdown("", id="approval-markdown")
             yield Input(
                 placeholder="new step name — press enter to confirm",
                 id="approval-edit-input",
@@ -110,6 +146,7 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
     def _render_all(self) -> None:
         self._render_header()
         self._render_steps()
+        self._render_briefing_panel()
         self._render_footer()
 
     def _render_header(self) -> None:
@@ -124,6 +161,13 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
 
     def _render_steps(self) -> None:
         text = Text()
+        if not self._plan.steps:
+            text.append("\n  (no steps)\n", style="#ff2040")
+            self.query_one("#approval-steps", Static).update(text)
+            return
+
+        self._selected_idx = max(0, min(self._selected_idx, len(self._plan.steps) - 1))
+
         for i, step in enumerate(self._plan.steps):
             agent_color = _AGENT_COLORS.get(step.agent, "#555570")
             tools_str = ", ".join(step.required_tools) if step.required_tools else "—"
@@ -147,6 +191,14 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
         text.append("\n")
         self.query_one("#approval-steps", Static).update(text)
 
+    def _render_briefing_panel(self) -> None:
+        md_widget = self.query_one("#approval-markdown", Markdown)
+        if not self._plan.steps:
+            md_widget.update("# No steps in plan\n")
+            return
+        step = self._plan.steps[self._selected_idx]
+        md_widget.update(step_preview_markdown(step))
+
     def _render_footer(self) -> None:
         text = Text()
         text.append("[A] ", style="bold #ffd700")
@@ -158,28 +210,40 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
         text.append("[E] ", style="bold #00d4ff")
         text.append("Edit Step", style="#c8c8d8")
         text.append("    ", style="#555570")
+        text.append("[D] ", style="bold #ff9500")
+        text.append("Delete Step", style="#c8c8d8")
+        text.append("    ", style="#555570")
         text.append("[X] ", style="bold #ff2040")
         text.append("Cancel", style="#c8c8d8")
+        text.append("\n", style="#555570")
+        if self._md_path is not None:
+            text.append(f"Plan saved: {self._md_path}", style="italic #555570")
+        else:
+            text.append("Plan file: not saved (see logs)", style="italic #555570")
         self.query_one("#approval-footer", Static).update(text)
 
     # ── Navigation ──────────────────────────────────────────────────────────
 
     def action_move_up(self) -> None:
-        if self._editing:
+        if self._editing or not self._plan.steps:
             return
         self._selected_idx = max(0, self._selected_idx - 1)
         self._render_steps()
+        self._render_briefing_panel()
 
     def action_move_down(self) -> None:
-        if self._editing:
+        if self._editing or not self._plan.steps:
             return
         self._selected_idx = min(len(self._plan.steps) - 1, self._selected_idx + 1)
         self._render_steps()
+        self._render_briefing_panel()
 
     # ── Actions ─────────────────────────────────────────────────────────────
 
     def action_approve(self) -> None:
         if self._editing:
+            return
+        if not self._plan.steps:
             return
         self.dismiss(self._plan)
 
@@ -200,6 +264,19 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
         edit_input.focus()
         self._editing = True
 
+    def action_delete_step(self) -> None:
+        if self._editing or not self._plan.steps:
+            return
+        if len(self._plan.steps) <= 1:
+            return
+        removed = self._plan.steps.pop(self._selected_idx)
+        rid = removed.id
+        for s in self._plan.steps:
+            s.depends_on = [d for d in s.depends_on if d != rid]
+        self._selected_idx = min(self._selected_idx, len(self._plan.steps) - 1)
+        self._cancel_edit()
+        self._render_all()
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if not self._editing or not self._plan.steps:
             return
@@ -214,4 +291,5 @@ class PlanApprovalScreen(ModalScreen[AttackPlan | None]):
         edit_input.disabled = True
         self._editing = False
         self._render_steps()
+        self._render_briefing_panel()
         self.set_focus(None)
