@@ -33,8 +33,6 @@
 
 ## Screenshots
 
-Use **sanitized** screenshots only — no real client names, scoped targets, credentials, or raw tool output from live engagements.
-
 ![NEMESIS](docs/screenshots/print1.png)
 ![NEMESIS](docs/screenshots/print2.png)
 ![NEMESIS](docs/screenshots/print3.png)
